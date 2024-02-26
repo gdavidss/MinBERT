@@ -51,13 +51,16 @@ class BertSelfAttention(nn.Module):
 
     ### TODO
     # Calculate attention scores
+    dk = key.size(-1)
     scores = torch.matmul(query, key.transpose(-1, -2))
+    scores = scores / (dk ** 0.5)
 
     # Apply attention mask
-    scores = scores * attention_mask
+    scores = scores + attention_mask
 
     # Normalize attention scores
     attention_probs = F.softmax(scores, dim=-1)
+    attention_probs = self.dropout(attention_probs)
 
     # Multiply attention scores with value
     weighted_values = torch.matmul(attention_probs, value)
@@ -141,7 +144,9 @@ class BertLayer(nn.Module):
     # Apply the add-norm operation for the multi-head attention layer
     attention_output = self.add_norm(hidden_states, attention_output, self.attention_dense, self.attention_dropout, self.attention_layer_norm)
     # Apply the feed forward layer
-    intermediate_output = self.interm_af(self.interm_dense(attention_output))
+    intermediate_output = self.interm_dense(attention_output)
+    intermediate_output = self.interm_af(intermediate_output)
+    intermediate_output = self.interm_dense(attention_norm_output)
     # Apply the add-norm operation for the feed forward layer
     layer_output = self.add_norm(attention_output, intermediate_output, self.out_dense, self.out_dropout, self.out_layer_norm)
     return layer_output
