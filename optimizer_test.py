@@ -15,6 +15,7 @@ def test_optimizer(opt_class) -> torch.Tensor:
         weight_decay=1e-4,
         correct_bias=True,
     )
+    
     for i in range(1000):
         opt.zero_grad()
         x = torch.FloatTensor(rng.uniform(size=[model.in_features]))
