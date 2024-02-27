@@ -59,8 +59,32 @@ class AdamW(Optimizer):
                 # 4. Apply weight decay after the main gradient-based updates.
                 # Refer to the default project handout for more details.
 
-                ### TODO
-                raise NotImplementedError
+                state['step'] = 0 if 'step' not in state else state['step']
+                state['step'] += 1
 
+                beta1, beta2 = group['betas']
+                eps = group['eps']
+                weight_decay = group['weight_decay']
+
+                if 'exp_avg' not in state:
+                    state['exp_avg'] = torch.zeros_like(p.data)
+                if 'exp_avg_sq' not in state:
+                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+
+                exp_avg = exp_avg * beta1 + (1 - beta1) * grad                
+                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+                
+                bias_corrected_exp_avg = exp_avg / (1 - beta1 ** state['step'])
+                bias_corrected_exp_avg_sq = exp_avg_sq / (1 - beta2 ** state['step'])
+
+                p.data += (-1) * alpha * (bias_corrected_exp_avg / (bias_corrected_exp_avg_sq.sqrt() + eps))
+
+                if weight_decay != 0:
+                    p.data.add_(-weight_decay * alpha, p.data)
+
+                state['exp_avg'] = exp_avg
+                state['exp_avg_sq'] = exp_avg_sq
 
         return loss
