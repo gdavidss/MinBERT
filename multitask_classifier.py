@@ -72,8 +72,9 @@ class MultitaskBERT(nn.Module):
                 param.requires_grad = True
         # You will want to add layers here to perform the downstream tasks.
         ### TODO
-        raise NotImplementedError
-
+        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+        self.fc = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
+        self.fc2 = torch.nn.Linear(config.hidden_size, 2)
 
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
@@ -82,7 +83,9 @@ class MultitaskBERT(nn.Module):
         # When thinking of improvements, you can later try modifying this
         # (e.g., by adding other layers).
         ### TODO
-        raise NotImplementedError
+        outputs = self.bert(input_ids, attention_mask)
+        pooler_output = outputs['pooler_output']
+        return pooler_output
 
 
     def predict_sentiment(self, input_ids, attention_mask):
@@ -92,7 +95,9 @@ class MultitaskBERT(nn.Module):
         Thus, your output should contain 5 logits for each sentence.
         '''
         ### TODO
-        raise NotImplementedError
+        output = self.forward(input_ids, attention_mask)
+        logits = self.fc(self.dropout(output))
+        return logits
 
 
     def predict_paraphrase(self,
@@ -103,7 +108,15 @@ class MultitaskBERT(nn.Module):
         during evaluation.
         '''
         ### TODO
-        raise NotImplementedError
+        output_1 = self.forward(input_ids_1, attention_mask_1)
+        output_2 = self.forward(input_ids_2, attention_mask_2)
+        logits = torch.sum(output_1 * output_2, dim=1)
+        return logits
+    
+        # concatenate the two embeddings
+        # output = self.forward(input_ids_1 + input_ids_2, attention_mask_1 + attention_mask_2)
+        # logits = self.fc2(self.dropout(output))
+        # return logits
 
 
     def predict_similarity(self,
@@ -113,7 +126,10 @@ class MultitaskBERT(nn.Module):
         Note that your output should be unnormalized (a logit).
         '''
         ### TODO
-        raise NotImplementedError
+        output_1 = self.forward(input_ids_1, attention_mask_1)
+        output_2 = self.forward(input_ids_2, attention_mask_2)
+        logits = torch.sum(output_1 * output_2, dim=1)
+        return logits
 
 
 
@@ -141,7 +157,7 @@ def train_multitask(args):
     look at test_multitask below to see how you can use the custom torch `Dataset`s
     in datasets.py to load in examples from the Quora and SemEval datasets.
     '''
-    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    device = torch.device('mps') if args.use_gpu else torch.device('cpu')
     # Create the data and its corresponding datasets and dataloader.
     sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
     sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
@@ -208,7 +224,7 @@ def train_multitask(args):
 def test_multitask(args):
     '''Test and save predictions on the dev and test sets of all three tasks.'''
     with torch.no_grad():
-        device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+        device = torch.device('mps') if args.use_gpu else torch.device('cpu')
         saved = torch.load(args.filepath)
         config = saved['model_config']
 
