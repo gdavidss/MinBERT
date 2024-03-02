@@ -24,6 +24,8 @@ from bert import BertModel
 from optimizer import AdamW
 from tqdm import tqdm
 
+import pickle
+
 from datasets import (
     SentenceClassificationDataset,
     SentenceClassificationTestDataset,
@@ -45,7 +47,7 @@ def seed_everything(seed=11711):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
+    torch .backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
 
@@ -87,6 +89,9 @@ class MultitaskBERT(nn.Module):
         pooler_output = outputs['pooler_output']
         return pooler_output
 
+    def sts_embedding(self, input_ids, attention_mask):
+        # This could just be the forward method or a variant if you need different processing
+        return self.forward(input_ids, attention_mask)
 
     def predict_sentiment(self, input_ids, attention_mask):
         '''Given a batch of sentences, outputs logits for classifying sentiment.
@@ -99,7 +104,6 @@ class MultitaskBERT(nn.Module):
         logits = self.fc(self.dropout(output))
         return logits
 
-
     def predict_paraphrase(self,
                            input_ids_1, attention_mask_1,
                            input_ids_2, attention_mask_2):
@@ -108,16 +112,48 @@ class MultitaskBERT(nn.Module):
         during evaluation.
         '''
         ### TODO
+        """
+        # Code used to save params to a file so that I debugged the tensors dimensions 
+        without needing to run a full epoch
+
+        method_params = {
+            'input_ids_1': input_ids_1.cpu(),
+            'attention_mask_1': attention_mask_1.cpu(),
+            'input_ids_2': input_ids_2.cpu(),
+            'attention_mask_2': attention_mask_2.cpu()
+        }
+
+        with open("predict_paraphrase_params.pkl", 'wb') as f:
+            method_params = pickle.dump(method_params, f)
+       
+        params = []
+
+        with open("predict_paraphrase_params.pkl", 'rb') as f:
+            params = pickle.load(f)
+        
+
+        input_ids_1 = params['input_ids_1']
+        attention_mask_1 = params['attention_mask_1']
+        input_ids_2 = params['input_ids_2']
+        attention_mask_2 = params['attention_mask_2']
+         """
+        # real code starts here
         output_1 = self.forward(input_ids_1, attention_mask_1)
         output_2 = self.forward(input_ids_2, attention_mask_2)
-        logits = torch.sum(output_1 * output_2, dim=1)
-        return logits
-    
-        # concatenate the two embeddings
-        # output = self.forward(input_ids_1 + input_ids_2, attention_mask_1 + attention_mask_2)
-        # logits = self.fc2(self.dropout(output))
-        # return logits
+        
+        # Print statements for debugging
+        #print("Output 1 shape:", output_1.shape)
+        #print("Output 1 type:", type(output_1))
+        #print("Output 2 shape:", output_2.shape)
+        #print("Output 2 type:", type(output_2))
+        
+        # Normalize the embeddings
+        output_1_norm = F.normalize(output_1, p=2, dim=1)
+        output_2_norm = F.normalize(output_2, p=2, dim=1)
 
+        # Compute cosine similarity
+        cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
+        return cosine_sim
 
     def predict_similarity(self,
                            input_ids_1, attention_mask_1,
@@ -128,9 +164,14 @@ class MultitaskBERT(nn.Module):
         ### TODO
         output_1 = self.forward(input_ids_1, attention_mask_1)
         output_2 = self.forward(input_ids_2, attention_mask_2)
-        logits = torch.sum(output_1 * output_2, dim=1)
-        return logits
-
+        
+        # Normalize the embeddings
+        output_1_norm = F.normalize(output_1, p=2, dim=1)
+        output_2_norm = F.normalize(output_2, p=2, dim=1)
+        
+        # Compute cosine similarity
+        cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
+        return cosine_sim
 
 
 
@@ -157,7 +198,7 @@ def train_multitask(args):
     look at test_multitask below to see how you can use the custom torch `Dataset`s
     in datasets.py to load in examples from the Quora and SemEval datasets.
     '''
-    device = torch.device('mps') if args.use_gpu else torch.device('cpu')
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # Create the data and its corresponding datasets and dataloader.
     sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
     sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
@@ -169,6 +210,7 @@ def train_multitask(args):
                                       collate_fn=sst_train_data.collate_fn)
     sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
                                     collate_fn=sst_dev_data.collate_fn)
+    cosine_loss = nn.CosineEmbeddingLoss()
 
     # Init model.
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
@@ -185,6 +227,8 @@ def train_multitask(args):
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
     best_dev_acc = 0
+    
+    cosine_loss = nn.CosineEmbeddingLoss()
 
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
@@ -224,7 +268,7 @@ def train_multitask(args):
 def test_multitask(args):
     '''Test and save predictions on the dev and test sets of all three tasks.'''
     with torch.no_grad():
-        device = torch.device('mps') if args.use_gpu else torch.device('cpu')
+        device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
         saved = torch.load(args.filepath)
         config = saved['model_config']
 
