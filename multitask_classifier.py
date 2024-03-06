@@ -33,7 +33,7 @@ from datasets import (
 )
 
 from evaluation import model_eval_sst, model_eval_multitask, model_eval_test_multitask
-
+from smart_pytorch import SMARTLoss, kl_loss, sym_kl_loss
 
 TQDM_DISABLE=False
 
@@ -186,6 +186,11 @@ def train_multitask(args):
     optimizer = AdamW(model.parameters(), lr=lr)
     best_dev_acc = 0
 
+    eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
+
+    # Create an instance of SMARTLoss
+    smart_loss_fn = SMARTLoss(eval_fn=eval_fn, loss_fn=kl_loss, loss_last_fn=sym_kl_loss)
+
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()
@@ -198,10 +203,18 @@ def train_multitask(args):
             b_ids = b_ids.to(device)
             b_mask = b_mask.to(device)
             b_labels = b_labels.to(device)
+            lam = 3
 
             optimizer.zero_grad()
             logits = model.predict_sentiment(b_ids, b_mask)
+            
+            embed = model.forward(b_ids,b_mask)
+            state = eval_fn(embed)
+
             loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+
+            smart_loss = smart_loss_fn(embed,state)
+            loss += lam*smart_loss
 
             loss.backward()
             optimizer.step()
