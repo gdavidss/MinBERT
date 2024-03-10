@@ -37,7 +37,6 @@ from evaluation import model_eval_sst, model_eval_multitask, model_eval_test_mul
 
 TQDM_DISABLE=False
 
-
 # Fix the random seed.
 def seed_everything(seed=11711):
     random.seed(seed)
@@ -70,6 +69,7 @@ class MultitaskBERT(nn.Module):
                 param.requires_grad = False
             elif config.option == 'finetune':
                 param.requires_grad = True
+
         # You will want to add layers here to perform the downstream tasks.
         ### TODO
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
@@ -85,57 +85,7 @@ class MultitaskBERT(nn.Module):
         ### TODO
         outputs = self.bert(input_ids, attention_mask)
         pooler_output = outputs['pooler_output']
-        return pooler_output
-
-
-    def predict_sentiment(self, input_ids, attention_mask):
-        '''Given a batch of sentences, outputs logits for classifying sentiment.
-        There are 5 sentiment classes:
-        (0 - negative, 1- somewhat negative, 2- neutral, 3- somewhat positive, 4- positive)
-        Thus, your output should contain 5 logits for each sentence.
-        '''
-        ### TODO
-        output = self.forward(input_ids, attention_mask)
-        logits = self.fc(self.dropout(output))
-        return logits
-
-
-    def predict_paraphrase(self,
-                           input_ids_1, attention_mask_1,
-                           input_ids_2, attention_mask_2):
-        '''Given a batch of pairs of sentences, outputs a single logit for predicting whether they are paraphrases.
-        Note that your output should be unnormalized (a logit); it will be passed to the sigmoid function
-        during evaluation.
-        '''
-        ### TODO
-        output_1 = self.forward(input_ids_1, attention_mask_1)
-        output_2 = self.forward(input_ids_2, attention_mask_2)
-        logits = torch.sum(output_1 * output_2, dim=1)
-        return logits
-    
-        # concatenate the two embeddings
-        # output = self.forward(input_ids_1 + input_ids_2, attention_mask_1 + attention_mask_2)
-        # logits = self.fc2(self.dropout(output))
-        # return logits
-
-
-    def predict_similarity(self,
-                           input_ids_1, attention_mask_1,
-                           input_ids_2, attention_mask_2):
-        '''Given a batch of pairs of sentences, outputs a single logit corresponding to how similar they are.
-        Note that your output should be unnormalized (a logit).
-        '''
-        ### TODO
-        output_1 = self.forward(input_ids_1, attention_mask_1)
-        output_2 = self.forward(input_ids_2, attention_mask_2)
-        logits = torch.sum(output_1 * output_2, dim=1)
-        return logits
-
-def cosine_similarity_embedding(embed1, embed2, temp):
-    #cls.sim = Similarity(temp=cls.model_args.temp)
-    #self.cos = nn.CosineSimilarity(dim=-1)
-    return F.cosine_similarity(embed1, embed2, dim=1) / temp 
-
+        return pooler_output 
 
 def save_model(model, optimizer, args, config, filepath):
     save_info = {
@@ -152,15 +102,46 @@ def save_model(model, optimizer, args, config, filepath):
     print(f"save the model to {filepath}")
 
 
-def train_multitask(args):
-    '''Train MultitaskBERT.
+def contrastive_learning_loss(embed1, embed2, all_embeds, temp = 0.5):
+    '''Compute the contrastive learning loss.
 
-    Currently only trains on SST dataset. The way you incorporate training examples
-    from other datasets into the training procedure is up to you. To begin, take a
-    look at test_multitask below to see how you can use the custom torch `Dataset`s
-    in datasets.py to load in examples from the Quora and SemEval datasets.
+    This function computes the contrastive learning loss between two sets of
+    embeddings. The loss is computed as the cross-entropy loss between the
+    cosine similarity of the embeddings and the labels.
+
+    Returns:
+    - loss: A scalar representing the contrastive learning loss.
+    '''
+    # Compute the cosine similarity between the embeddings.
+    numerator = F.cosine_similarity(embed1, embed2, dim=1)
+
+    cos_sim = cosine_similarity_embedding(embed1, embed2, temp)
+
+    # Compute the cross-entropy loss between the cosine similarity and the labels.
+    loss_function = nn.CrossEntropyLoss()
+    loss = loss_function(cos_sim, b_labels.view(-1))
+
+    return loss
+
+def generate_dropout_mask(embeddings, dropout_rate):
+    # Generate a mask with the same shape as the embeddings
+    dropout_mask = torch.rand(embeddings.shape) > dropout_rate
+    
+    # Cast to the same data type and device as embeddings
+    dropout_mask = dropout_mask.to(embeddings.dtype).to(embeddings.device)
+    
+    return dropout_mask
+
+def train_CLS(args):
+    '''Train contrastive learning.
+
+    This function performs additional pretraining on top of the BERT model
+    using contrastive learning. The contrastive learning objective is to
+    maximize the similarity between positive pairs and minimize the similarity
+    between negative pairs.
     '''
     device = torch.device('mps') if args.use_gpu else torch.device('cpu')
+
     # Create the data and its corresponding datasets and dataloader.
     sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
     sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
@@ -170,6 +151,7 @@ def train_multitask(args):
 
     sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
                                       collate_fn=sst_train_data.collate_fn)
+    
     sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
                                     collate_fn=sst_dev_data.collate_fn)
 
@@ -188,37 +170,29 @@ def train_multitask(args):
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
     best_dev_acc = 0
-    temp = 0.05
 
-    # Evaluation function for SMARTLoss
-    eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
-
-    # Create an instance of SMARTLoss
-    #smart_loss_fn = SMARTLoss(eval_fn=eval_fn, loss_fn=kl_loss, loss_last_fn=sym_kl_loss)
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()
         train_loss = 0
         num_batches = 0
         for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            b_ids, b_mask, b_labels = (batch['token_ids'],
-                                       batch['attention_mask'], batch['labels'])
+            b_ids = (batch['token_ids'], batch['attention_mask'])
 
             b_ids = b_ids.to(device)
             b_mask = b_mask.to(device)
-            b_labels = b_labels.to(device)
-            lam = 3
 
             optimizer.zero_grad()
-            logits = model.predict_sentiment(b_ids, b_mask)
-             
+            
             embed1 = model.forward(b_ids, b_mask)
+            mask1 = generate_dropout_mask(embed1, args.hidden_dropout_prob)
             embed1.requires_grad = True
 
-            state = eval_fn(embed1)
-
-            embed2 = model.forward(b_ids, b_mask)
+            embed2 = model.forward(b_ids, b_mask) #gera uma nova mascara
+            mask2 = generate_dropout_mask(embed2, args.hidden_dropout_prob)
             embed2.requires_grad = True
+
+
             
             # cosine sim ranges from 0 to 1 
             # how do we convert to class prediction?,
@@ -228,117 +202,11 @@ def train_multitask(args):
             # do contrastive pre-training, learn on that contrastive learning -- don't use it in the finetuning
             cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0), temp = temp)
 
-            # contrastive learning is used as pre-training not finetuning (it's complicated to use in finetuning)
-            # save the weights and use them in the finetuning
-            # load the weights and call multitask 
-            # where to modify the code for pretraining? we need to write the pretraining functions 
-            # (take in dataloader and write my own training loop -- it would look like the finetuning (but writing the loss function))
-            # there's no dealing with labels in the pretraining
-            # two for loop (one for i and other for all j's)
-            # get data online to do the pretraining (sake for simplicity use the dataloader for the downstream tasks (just take the input ids)
-            # concatenate the data and use the same dataloader
 
             loss_function = nn.CrossEntropyLoss()
             loss = loss_function(cos_sim, b_labels.view(-1))
-          
-            #loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
-
             loss.backward()
-            optimizer.step()
 
-            train_loss += loss.item()
-            num_batches += 1
-
-        train_loss = train_loss / (num_batches)
-
-        train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
-        dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
-
-        if dev_acc > best_dev_acc:
-            best_dev_acc = dev_acc
-            save_model(model, optimizer, args, config, args.filepath)
-
-        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
-
-def train_multitask_CLE(args):
-    '''Train MultitaskBERT.
-
-    Currently only trains on SST dataset. The way you incorporate training examples
-    from other datasets into the training procedure is up to you. To begin, take a
-    look at test_multitask below to see how you can use the custom torch `Dataset`s
-    in datasets.py to load in examples from the Quora and SemEval datasets.
-    '''
-    device = torch.device('mps') if args.use_gpu else torch.device('cpu')
-
-    # SIMCSE: Add quora and STS
-
-    # Create the data and its corresponding datasets and dataloader.
-    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
-
-    sst_train_data = SentenceClassificationDataset(sst_train_data, args)
-    sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
-
-    sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
-                                      collate_fn=sst_train_data.collate_fn)
-    sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
-                                    collate_fn=sst_dev_data.collate_fn)
-
-    # Init model.
-    config = {'hidden_dropout_prob': args.hidden_dropout_prob,
-              'num_labels': num_labels,
-              'hidden_size': 768,
-              'data_dir': '.',
-              'option': args.option}
-
-    config = SimpleNamespace(**config)
-
-    model = MultitaskBERT(config)
-    model = model.to(device)
-
-    lr = args.lr
-    optimizer = AdamW(model.parameters(), lr=lr)
-    best_dev_acc = 0
-
-    # Evaluation function for SMARTLoss
-    eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
-
-    # Create an instance of SMARTLoss
-    #smart_loss_fn = SMARTLoss(eval_fn=eval_fn, loss_fn=kl_loss, loss_last_fn=sym_kl_loss)
-
-    # Run for the specified number of epochs.
-    for epoch in range(args.epochs):
-        model.train()
-        train_loss = 0
-        num_batches = 0
-        for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            b_ids, b_mask, b_labels = (batch['token_ids'],
-                                       batch['attention_mask'], batch['labels'])
-
-            b_ids = b_ids.to(device)
-            b_mask = b_mask.to(device)
-            b_labels = b_labels.to(device)
-
-            lam = 3
-
-            optimizer.zero_grad()
-            logits = model.predict_sentiment(b_ids, b_mask)
-            
-            embed = model.forward(b_ids,b_mask)
-            state = eval_fn(embed)
-
-            # SIMCSE: How does the loss changes?
-            # What does the training learning objective equation mean?
-            # in particular, what is 'i' in the equation? is it a single sentence or a collection of sentences?
-            # how do calculate the denominator?
-            #F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
-            
-            # SIMCSE: how do we change the training loop here to do unsurpervised learning (and perhaps in another function supervised)?
-
-            # smart_loss = smart_loss_fn(embed,state)
-            # loss += lam * smart_loss
-
-            loss.backward()
             optimizer.step()
 
             train_loss += loss.item()
