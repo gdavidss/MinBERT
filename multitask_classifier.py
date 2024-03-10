@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 from bert import BertModel
 from optimizer import AdamW
 from tqdm import tqdm
+# from pcgrad import PCGrad
 
 from datasets import (
     SentenceClassificationDataset,
@@ -156,9 +157,13 @@ def save_model(model, optimizer, args, config, filepath):
     print(f"save the model to {filepath}")
 
 ## HELPER FUNCTION for train_multitask
-def load_data(train_data, dev_data, args):
-    train_data = SentenceClassificationDataset(train_data, args)
-    dev_data = SentenceClassificationDataset(dev_data, args)
+def load_data(train_data, dev_data, args, type):
+    if type == 'sst':
+        train_data = SentenceClassificationDataset(train_data, args)
+        dev_data = SentenceClassificationDataset(dev_data, args)
+    else:
+        train_data = SentencePairDataset(train_data, args)
+        dev_data = SentencePairDataset(dev_data, args)
 
     train_dataloader = DataLoader(train_data, shuffle=True, batch_size=args.batch_size,
                                       collate_fn=train_data.collate_fn)
@@ -257,6 +262,65 @@ def train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimi
     dev_acc = model_eval_para(para_dev_dataloader, model, device)
     return train_loss, train_acc, dev_acc
 
+## HELPER FUNCTION for train_multiple
+def calculate_loss(batch, device, model, type):
+    if type == 'sst':
+        b_ids, b_mask, b_labels = (batch['token_ids'],
+                                batch['attention_mask'], batch['labels'])
+        
+        b_ids = b_ids.to(device)
+        b_mask = b_mask.to(device)
+        b_labels = b_labels.to(device)
+
+        logits = model.predict_sentiment(b_ids, b_mask)
+        loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+    
+    else:
+        (b_ids1, b_mask1,
+            b_ids2, b_mask2,
+            b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
+                        batch['token_ids_2'], batch['attention_mask_2'],
+                        batch['labels'], batch['sent_ids'])
+
+        b_ids1 = b_ids1.to(device)
+        b_mask1 = b_mask1.to(device)
+        b_ids2 = b_ids2.to(device)
+        b_mask2 = b_mask2.to(device)
+        b_labels = b_labels.to(device)
+
+        if type == 'sts':
+            logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).to(device)
+            loss = nn.MSELoss()(logits, b_labels.float().view(-1)) / args.batch_size
+        else:
+            logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2).to(device)
+            loss = nn.MSELoss()(logits.sigmoid(), b_labels.float().view(-1)) / args.batch_size
+
+    return loss
+
+# Batching from the two datasets at the same time
+def train_multiple(sst_train_dataloader, sst_dev_dataloader, sts_train_dataloader, sts_dev_dataloader, device, optimizer, model):
+    train_loss = 0
+    num_batches = 0
+    for i, (batch1, batch2) in enumerate(zip(sst_train_dataloader, sts_train_dataloader)):
+        optimizer.zero_grad()
+        loss = calculate_loss(batch1, device, model, 'sst') +  calculate_loss(batch2, device, model, 'sts')
+        loss.backward()
+        optimizer.step()
+
+        train_loss += loss.item()
+        num_batches += 1
+        if i % 100 == 0:
+            print("100 batches processed")
+
+    train_loss = train_loss / (num_batches)
+    # calculate the accuracy
+    train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
+    dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+    train_acc += model_eval_sts(sts_train_dataloader, model, device)
+    dev_acc += model_eval_sts(sts_dev_dataloader, model, device)
+    return train_loss, train_acc, dev_acc
+
+
 def train_multitask(args):
     '''Train MultitaskBERT.
 
@@ -270,9 +334,15 @@ def train_multitask(args):
     sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
     sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
 
-    sst_train_dataloader, sst_dev_dataloader = load_data(sst_train_data, sst_dev_data, args)
-    sts_train_dataloader, sts_dev_dataloader = load_data(sts_train_data, sts_dev_data, args)
-    # para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args)
+    # Truncate to make the same size
+    min_len = min(len(sst_train_data), len(sts_train_data))
+    sst_train_data = sst_train_data[:min_len]
+    sts_train_data = sts_train_data[:min_len]
+
+    # Continue with dataloading
+    sst_train_dataloader, sst_dev_dataloader = load_data(sst_train_data, sst_dev_data, args, 'sst')
+    sts_train_dataloader, sts_dev_dataloader = load_data(sts_train_data, sts_dev_data, args, 'sts')
+    # para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
 
     # Init model.
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
@@ -294,19 +364,21 @@ def train_multitask(args):
     for epoch in range(args.epochs):
         model.train()
 
-        # Training for SST
-        sst_train_loss, sst_train_acc, sst_dev_acc = train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model)
-
         # Training for STS
-        sts_train_loss, sts_train_acc, sts_dev_acc = train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model)
-
+        # sts_train_loss, sts_train_acc, sts_dev_acc = train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model)
+        # Training for SST
+        # sst_train_loss, sst_train_acc, sst_dev_acc = train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model)
         # Training for Paraphrase (untested)
         # para_train_loss, para_train_acc, para_dev_acc = train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimizer, model)
 
         # Combining the different tasks
-        dev_acc = sst_dev_acc + sts_dev_acc
-        train_acc = sst_train_acc + sts_train_acc
-        train_loss = sst_train_loss + sts_train_loss
+        # dev_acc = sst_dev_acc + sts_dev_acc
+        # train_acc = sst_train_acc + sts_train_acc
+        # train_loss = sst_train_loss + sts_train_loss
+
+        train_loss, train_acc, dev_acc = train_multiple(sst_train_dataloader, sst_dev_dataloader, 
+                                                        sts_train_dataloader, sts_dev_dataloader, 
+                                                        device, optimizer, model)
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
