@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from bert import BertModel
 from optimizer import AdamW
 from tqdm import tqdm
-# from pcgrad import PCGrad
+from pcgrad import PCGrad
 
 from datasets import (
     SentenceClassificationDataset,
@@ -145,7 +145,7 @@ class MultitaskBERT(nn.Module):
 def save_model(model, optimizer, args, config, filepath):
     save_info = {
         'model': model.state_dict(),
-        'optim': optimizer.state_dict(),
+        'optim': optimizer.state_dict(), 
         'args': args,
         'model_config': config,
         'system_rng': random.getstate(),
@@ -297,15 +297,29 @@ def calculate_loss(batch, device, model, type):
 
     return loss
 
-# Batching from the two datasets at the same time
-def train_multiple(sst_train_dataloader, sst_dev_dataloader, sts_train_dataloader, sts_dev_dataloader, device, optimizer, model):
+# Batching from the three datasets at the same time
+def train_multiple(sst_train_dataloader, sst_dev_dataloader, 
+                   sts_train_dataloader, sts_dev_dataloader, 
+                   para_train_dataloader, para_dev_dataloader,
+                   device, optimizer, model, do_grad_surgery):
     train_loss = 0
     num_batches = 0
-    for i, (batch1, batch2) in enumerate(zip(sst_train_dataloader, sts_train_dataloader)):
+    for i, (batch1, batch2, batch3) in enumerate(zip(sst_train_dataloader, sts_train_dataloader, para_train_dataloader)):
         optimizer.zero_grad()
-        loss = calculate_loss(batch1, device, model, 'sst') +  calculate_loss(batch2, device, model, 'sts')
-        loss.backward()
-        optimizer.step()
+
+        if do_grad_surgery:
+            losses = [calculate_loss(batch1, device, model, 'sst'), 
+                      calculate_loss(batch2, device, model, 'sts'),
+                      calculate_loss(batch3, device, model, 'para')]
+            loss = sum(losses)
+            optimizer.pc_backward(losses) # using gradient surgery
+            optimizer.step()  # apply gradient step
+        else:
+            loss = calculate_loss(batch1, device, model, 'sst') 
+            loss += calculate_loss(batch2, device, model, 'sts') 
+            loss += calculate_loss(batch3, device, model, 'para')
+            loss.backward()
+            optimizer.step()
 
         train_loss += loss.item()
         num_batches += 1
@@ -318,6 +332,8 @@ def train_multiple(sst_train_dataloader, sst_dev_dataloader, sts_train_dataloade
     dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
     train_acc += model_eval_sts(sts_train_dataloader, model, device)
     dev_acc += model_eval_sts(sts_dev_dataloader, model, device)
+    train_acc += model_eval_para(para_train_dataloader, model, device)
+    dev_acc += model_eval_para(para_dev_dataloader, model, device)
     return train_loss, train_acc, dev_acc
 
 
@@ -335,14 +351,18 @@ def train_multitask(args):
     sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
 
     # Truncate to make the same size
-    min_len = min(len(sst_train_data), len(sts_train_data))
+    min_len = min(len(sst_train_data), len(sts_train_data), len(para_train_data))
     sst_train_data = sst_train_data[:min_len]
     sts_train_data = sts_train_data[:min_len]
+    para_train_data = para_train_data[:min_len]
 
     # Continue with dataloading
     sst_train_dataloader, sst_dev_dataloader = load_data(sst_train_data, sst_dev_data, args, 'sst')
     sts_train_dataloader, sts_dev_dataloader = load_data(sts_train_data, sts_dev_data, args, 'sts')
-    # para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
+    para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
+
+    # Flag for whether to do Gradient Surgery or not
+    do_grad_surgery = False
 
     # Init model.
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
@@ -357,14 +377,17 @@ def train_multitask(args):
     model = model.to(device)
 
     lr = args.lr
-    optimizer = AdamW(model.parameters(), lr=lr)
+    if do_grad_surgery:
+        optimizer = PCGrad(AdamW(model.parameters(), lr=lr)) 
+    else:
+        optimizer = AdamW(model.parameters(), lr=lr)
     best_dev_acc = 0
 
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()
 
-        # Training for STS
+        # Training for STS (sequential version)
         # sts_train_loss, sts_train_acc, sts_dev_acc = train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model)
         # Training for SST
         # sst_train_loss, sst_train_acc, sst_dev_acc = train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model)
@@ -378,11 +401,12 @@ def train_multitask(args):
 
         train_loss, train_acc, dev_acc = train_multiple(sst_train_dataloader, sst_dev_dataloader, 
                                                         sts_train_dataloader, sts_dev_dataloader, 
-                                                        device, optimizer, model)
+                                                        para_train_dataloader, para_dev_dataloader,
+                                                        device, optimizer, model, do_grad_surgery)
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
-            save_model(model, optimizer, args, config, args.filepath)
+            save_model(model, optimizer, args, config, args.filepath) 
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
