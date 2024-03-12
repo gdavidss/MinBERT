@@ -152,7 +152,7 @@ def save_model(model, optimizer, args, config, filepath):
     print(f"save the model to {filepath}")
 
 
-def train_multitask(args):
+def train_multitask_CLE(args):
     '''Train MultitaskBERT.
 
     Currently only trains on SST dataset. The way you incorporate training examples
@@ -160,7 +160,7 @@ def train_multitask(args):
     look at test_multitask below to see how you can use the custom torch `Dataset`s
     in datasets.py to load in examples from the Quora and SemEval datasets.
     '''
-    device = torch.device('mps') if args.use_gpu else torch.device('cpu')
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # Create the data and its corresponding datasets and dataloader.
     sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
     sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
@@ -193,6 +193,7 @@ def train_multitask(args):
     # Evaluation function for SMARTLoss
     eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
 
+    print("Hi! I'm pretraining now using unsupervised learning! (run with finetune flag)")
     # Create an instance of SMARTLoss
     #smart_loss_fn = SMARTLoss(eval_fn=eval_fn, loss_fn=kl_loss, loss_last_fn=sym_kl_loss)
     # Run for the specified number of epochs.
@@ -207,7 +208,7 @@ def train_multitask(args):
             b_ids = b_ids.to(device)
             b_mask = b_mask.to(device)
             b_labels = b_labels.to(device)
-            
+
             optimizer.zero_grad()
             logits = model.predict_sentiment(b_ids, b_mask)
              
@@ -219,23 +220,15 @@ def train_multitask(args):
             # print(embed1.shape)
             # print(embed2.shape)
             cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
-            # print(embed1.unsqueeze(1).shape)
-            # print(embed2.unsqueeze(0).shape)
-            # print(cos_sim.shape)
             
             # print(cos_sim)
             # print(cos_sim.shape)
             # print(logits.shape)
             # print(b_labels.shape)
-            #print(cos_sim.shape)
-            # labels = torch.arange(cos_sim.size(0)).long()
-            #print(labels)
-            #print(b_labels)
+            # print(cos_sim.shape)
             loss_function = nn.CrossEntropyLoss()
             labels = torch.arange(cos_sim.size(0)).long().to(device)
             loss = loss_function(cos_sim,labels)
-          
-            #loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
             loss.backward()
             optimizer.step()
@@ -254,7 +247,7 @@ def train_multitask(args):
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
-def train_multitask_CLE(args):
+def train_multitask(args):
     '''Train MultitaskBERT.
 
     Currently only trains on SST dataset. The way you incorporate training examples
@@ -262,9 +255,7 @@ def train_multitask_CLE(args):
     look at test_multitask below to see how you can use the custom torch `Dataset`s
     in datasets.py to load in examples from the Quora and SemEval datasets.
     '''
-    device = torch.device('mps') if args.use_gpu else torch.device('cpu')
-
-    # SIMCSE: Add quora and STS
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
 
     # Create the data and its corresponding datasets and dataloader.
     sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
@@ -285,21 +276,29 @@ def train_multitask_CLE(args):
               'data_dir': '.',
               'option': args.option}
 
-    config = SimpleNamespace(**config)
+    #config = SimpleNamespace(**config)
+
+    saved = torch.load(args.filepath)
+    config = saved['model_config']
 
     model = MultitaskBERT(config)
+    model.load_state_dict(saved['model'])
     model = model.to(device)
+    print(f"Pretrained model to train from {args.filepath}")
+
+    #model = MultitaskBERT(config)
+    #model = model.to(device)
 
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
     best_dev_acc = 0
 
     # Evaluation function for SMARTLoss
-    eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
+    #eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
 
     # Create an instance of SMARTLoss
     #smart_loss_fn = SMARTLoss(eval_fn=eval_fn, loss_fn=kl_loss, loss_last_fn=sym_kl_loss)
-
+    print("Hi! I'm loading in the weights from the pretrained model and now doing regular training")
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()
@@ -313,13 +312,11 @@ def train_multitask_CLE(args):
             b_mask = b_mask.to(device)
             b_labels = b_labels.to(device)
 
-            lam = 3
-
             optimizer.zero_grad()
             logits = model.predict_sentiment(b_ids, b_mask)
-            
-            embed = model.forward(b_ids,b_mask)
-            state = eval_fn(embed)
+            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+            #embed = model.forward(b_ids,b_mask)
+            #state = eval_fn(embed)
 
             # SIMCSE: How does the loss changes?
             # What does the training learning objective equation mean?
@@ -352,7 +349,7 @@ def train_multitask_CLE(args):
 def test_multitask(args):
     '''Test and save predictions on the dev and test sets of all three tasks.'''
     with torch.no_grad():
-        device = torch.device('mps') if args.use_gpu else torch.device('cpu')
+        device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
         saved = torch.load(args.filepath)
         config = saved['model_config']
 
@@ -480,5 +477,6 @@ if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.option}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
+    train_multitask_CLE(args)
     train_multitask(args)
     test_multitask(args)
