@@ -152,7 +152,7 @@ def save_model(model, optimizer, args, config, filepath):
     print(f"save the model to {filepath}")
 
 
-def train_multitask_CLE(args):
+def pretrain_unsupervised_CLE(args):
     '''Train MultitaskBERT.
 
     Currently only trains on SST dataset. The way you incorporate training examples
@@ -477,6 +477,6 @@ if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.option}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
-    train_multitask_CLE(args)
+    pretrain_unsupervised_CLE(args)
     train_multitask(args)
     test_multitask(args)
