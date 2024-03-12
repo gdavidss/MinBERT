@@ -201,6 +201,7 @@ def train_sst_cle(sst_train_dataloader, sst_dev_dataloader, epoch, device, optim
 def train_sts_cle(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model):
     sts_train_loss = 0
     sts_num_batches = 0
+    temp = 0.05
     for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
         (b_ids1, b_mask1,
             b_ids2, b_mask2,
@@ -217,11 +218,17 @@ def train_sts_cle(sts_train_dataloader, sts_dev_dataloader, epoch, device, optim
         optimizer.zero_grad()
         embed1 = model.forward(b_ids1, b_mask1)
         embed2 = model.forward(b_ids1,b_mask1)
-        cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
-            
+        embed3 = model.forward(b_ids2,b_mask2)
+        embed4 = model.foward(b_ids2, b_mask2)
+        cos_sim1 = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
+        cos_sim2 = cosine_similarity_embedding(embed3.unsqueeze(1), embed4.unsqueeze(0),temp = temp)
+
         loss_function = nn.CrossEntropyLoss()
-        labels = torch.arange(cos_sim.size(0)).long().to(device)
-        loss = loss_function(cos_sim,labels)
+        labels = torch.arange(cos_sim1.size(0)).long().to(device)
+        #unaltered version
+        #loss = loss_function(cos_sim1,labels)
+        #altered version 
+        loss = loss_function(cos_sim1,labels) + loss_function(cos_sim2,labels)
 
         loss.backward()
         optimizer.step()
