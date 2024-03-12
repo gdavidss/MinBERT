@@ -123,14 +123,9 @@ def contrastive_learning_loss(embed1, embed2, all_embeds, temp = 0.5):
 
     return loss
 
-def generate_dropout_mask(embeddings, dropout_rate):
-    # Generate a mask with the same shape as the embeddings
-    dropout_mask = torch.rand(embeddings.shape) > dropout_rate
-    
-    # Cast to the same data type and device as embeddings
-    dropout_mask = dropout_mask.to(embeddings.dtype).to(embeddings.device)
-    
-    return dropout_mask
+
+def cosine_similarity_embedding(embed1, embed2, temp):
+    return F.cosine_similarity(embed1, embed2, dim=1) / temp
 
 def train_CLS(args):
     '''Train contrastive learning.
@@ -148,7 +143,7 @@ def train_CLS(args):
 
     sst_train_data = SentenceClassificationDataset(sst_train_data, args)
     sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
-
+    
     sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
                                       collate_fn=sst_train_data.collate_fn)
     
@@ -192,8 +187,6 @@ def train_CLS(args):
             mask2 = generate_dropout_mask(embed2, args.hidden_dropout_prob)
             embed2.requires_grad = True
 
-
-            
             # cosine sim ranges from 0 to 1 
             # how do we convert to class prediction?,
             # no contrast, they'd look always similar to 1
@@ -201,7 +194,6 @@ def train_CLS(args):
             # the label is a one-hot vector for when sentences are the same
             # do contrastive pre-training, learn on that contrastive learning -- don't use it in the finetuning
             cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0), temp = temp)
-
 
             loss_function = nn.CrossEntropyLoss()
             loss = loss_function(cos_sim, b_labels.view(-1))
