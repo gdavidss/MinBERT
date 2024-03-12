@@ -134,7 +134,7 @@ class MultitaskBERT(nn.Module):
 def cosine_similarity_embedding(embed1, embed2, temp):
     #cls.sim = Similarity(temp=cls.model_args.temp)
     #self.cos = nn.CosineSimilarity(dim=-1)
-    return F.cosine_similarity(embed1, embed2, dim=1) / temp 
+    return F.cosine_similarity(embed1, embed2, dim=-1) / temp 
 
 
 def save_model(model, optimizer, args, config, filepath):
@@ -207,39 +207,33 @@ def train_multitask(args):
             b_ids = b_ids.to(device)
             b_mask = b_mask.to(device)
             b_labels = b_labels.to(device)
-            lam = 3
-
+            
             optimizer.zero_grad()
             logits = model.predict_sentiment(b_ids, b_mask)
              
             embed1 = model.forward(b_ids, b_mask)
-            embed1.requires_grad = True
-
-            state = eval_fn(embed1)
-
-            embed2 = model.forward(b_ids, b_mask)
-            embed2.requires_grad = True
+            #embed1.requires_grad = True
+            #state = eval_fn(embed1)
+            embed2 = model.forward(b_ids,b_mask)
+            #embed2.requires_grad = True
+            # print(embed1.shape)
+            # print(embed2.shape)
+            cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
+            # print(embed1.unsqueeze(1).shape)
+            # print(embed2.unsqueeze(0).shape)
+            # print(cos_sim.shape)
             
-            # cosine sim ranges from 0 to 1 
-            # how do we convert to class prediction?,
-            # no contrast, they'd look always similar to 1
-            
-            # the label is a one-hot vector for when sentences are the same
-            # do contrastive pre-training, learn on that contrastive learning -- don't use it in the finetuning
-            cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0), temp = temp)
-
-            # contrastive learning is used as pre-training not finetuning (it's complicated to use in finetuning)
-            # save the weights and use them in the finetuning
-            # load the weights and call multitask 
-            # where to modify the code for pretraining? we need to write the pretraining functions 
-            # (take in dataloader and write my own training loop -- it would look like the finetuning (but writing the loss function))
-            # there's no dealing with labels in the pretraining
-            # two for loop (one for i and other for all j's)
-            # get data online to do the pretraining (sake for simplicity use the dataloader for the downstream tasks (just take the input ids)
-            # concatenate the data and use the same dataloader
-
+            # print(cos_sim)
+            # print(cos_sim.shape)
+            # print(logits.shape)
+            # print(b_labels.shape)
+            #print(cos_sim.shape)
+            # labels = torch.arange(cos_sim.size(0)).long()
+            #print(labels)
+            #print(b_labels)
             loss_function = nn.CrossEntropyLoss()
-            loss = loss_function(cos_sim, b_labels.view(-1))
+            labels = torch.arange(cos_sim.size(0)).long().to(device)
+            loss = loss_function(cos_sim,labels)
           
             #loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
