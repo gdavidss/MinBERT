@@ -32,7 +32,7 @@ from datasets import (
     load_multitask_data
 )
 
-from evaluation import model_eval_sst, model_eval_multitask, model_eval_test_multitask
+from evaluation import model_eval_sst, model_eval_multitask, model_eval_test_multitask, model_eval_para, model_eval_sts
 #from smart_pytorch import SMARTLoss, kl_loss, sym_kl_loss
 
 TQDM_DISABLE=False
@@ -151,8 +151,143 @@ def save_model(model, optimizer, args, config, filepath):
     torch.save(save_info, filepath)
     print(f"save the model to {filepath}")
 
+def load_data(train_data, dev_data, args, type):
+    if type == 'sst':
+        train_data = SentenceClassificationDataset(train_data, args)
+        dev_data = SentenceClassificationDataset(dev_data, args)
+    else:
+        train_data = SentencePairDataset(train_data, args)
+        dev_data = SentencePairDataset(dev_data, args)
 
-def pretrain_unsupervised_CLE(args):
+    train_dataloader = DataLoader(train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=train_data.collate_fn)
+    dev_dataloader = DataLoader(dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=dev_data.collate_fn)
+    return train_dataloader, dev_dataloader
+
+## HELPER FUNCTION: In an epoch, loops through each batch of SST dataset
+def train_sst_cle(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model):
+    sst_train_loss = 0
+    sst_num_batches = 0
+    temp = 0.05
+
+    for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+        b_ids, b_mask, b_labels = (batch['token_ids'],
+                                batch['attention_mask'], batch['labels'])
+        
+        b_ids = b_ids.to(device)
+        b_mask = b_mask.to(device)
+        b_labels = b_labels.to(device)
+
+        optimizer.zero_grad()
+        embed1 = model.forward(b_ids, b_mask)
+        embed2 = model.forward(b_ids,b_mask)
+        cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
+        loss_function = nn.CrossEntropyLoss()
+        labels = torch.arange(cos_sim.size(0)).long().to(device)
+        loss = loss_function(cos_sim,labels)
+        loss.backward()
+        optimizer.step()
+
+        sst_train_loss += loss.item()
+        sst_num_batches += 1
+
+    sst_train_loss = sst_train_loss / (sst_num_batches)
+    sst_train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
+    sst_dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+    return sst_train_loss, sst_train_acc, sst_dev_acc
+
+## HELPER FUNCTION: In an epoch, loops through each batch of SST dataset
+def train_sts_cle(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model):
+    sts_train_loss = 0
+    sts_num_batches = 0
+    for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+        (b_ids1, b_mask1,
+            b_ids2, b_mask2,
+            b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
+                        batch['token_ids_2'], batch['attention_mask_2'],
+                        batch['labels'], batch['sent_ids'])
+
+        b_ids1 = b_ids1.to(device)
+        b_mask1 = b_mask1.to(device)
+        b_ids2 = b_ids2.to(device)
+        b_mask2 = b_mask2.to(device)
+        b_labels = b_labels.to(device)
+
+        optimizer.zero_grad()
+        embed1 = model.forward(b_ids1, b_mask1)
+        embed2 = model.forward(b_ids1,b_mask1)
+        cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
+            
+        loss_function = nn.CrossEntropyLoss()
+        labels = torch.arange(cos_sim.size(0)).long().to(device)
+        loss = loss_function(cos_sim,labels)
+
+        loss.backward()
+        optimizer.step()
+
+        sts_train_loss += loss.item()
+        sts_num_batches += 1
+
+    sts_train_loss = sts_train_loss / (sts_num_batches)
+    sts_train_acc = model_eval_sts(sts_train_dataloader, model, device)
+    sts_dev_acc = model_eval_sts(sts_dev_dataloader, model, device)
+    return sts_train_loss, sts_train_acc, sts_dev_acc
+
+def simple_unsupervised_CLE(args):
+    '''Train MultitaskBERT.
+
+    Currently only trains on SST dataset. The way you incorporate training examples
+    from other datasets into the training procedure is up to you. To begin, take a
+    look at test_multitask below to see how you can use the custom torch `Dataset`s
+    in datasets.py to load in examples from the Quora and SemEval datasets.
+    '''
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    # Create the data and its corresponding datasets and dataloader.
+    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+
+    sst_train_data = SentenceClassificationDataset(sst_train_data, args)
+    sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
+
+    sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=sst_train_data.collate_fn)
+    sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=sst_dev_data.collate_fn)
+
+    # Init model.
+    config = {'hidden_dropout_prob': args.hidden_dropout_prob,
+              'num_labels': num_labels,
+              'hidden_size': 768,
+              'data_dir': '.',
+              'option': args.option}
+
+    config = SimpleNamespace(**config)
+
+    model = MultitaskBERT(config)
+    model = model.to(device)
+
+    lr = args.lr
+    optimizer = AdamW(model.parameters(), lr=lr)
+    best_dev_acc = 0
+    # Evaluation function for SMARTLoss
+    #eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
+
+    print("Hi! I'm pretraining now using unsupervised contrastive learning only on SST! (run with finetune flag)")
+    # Create an instance of SMARTLoss
+    #smart_loss_fn = SMARTLoss(eval_fn=eval_fn, loss_fn=kl_loss, loss_last_fn=sym_kl_loss)
+    # Run for the specified number of epochs.
+    for epoch in range(args.epochs):
+        model.train()
+        sst_train_loss, sst_train_acc, sst_dev_acc = train_sst_cle(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model)
+
+        if sst_dev_acc > best_dev_acc:
+            best_dev_acc = sst_dev_acc
+            save_model(model, optimizer, args, config, args.filepath)
+
+        print(f"Epoch {epoch}: train loss :: {sst_train_loss :.3f}, train acc :: {sst_train_acc :.3f}, dev acc :: {sst_dev_acc :.3f}")
+
+def simple_unsupervised_old(args):
     '''Train MultitaskBERT.
 
     Currently only trains on SST dataset. The way you incorporate training examples
@@ -246,6 +381,69 @@ def pretrain_unsupervised_CLE(args):
             save_model(model, optimizer, args, config, args.filepath)
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+
+
+def pretrain_unsupervised_CLE(args):
+    '''Train MultitaskBERT.
+
+    Currently trains on two datasets. The way you incorporate training examples
+    from other datasets into the training procedure is up to you. To begin, take a
+    look at test_multitask below to see how you can use the custom torch `Dataset`s
+    in datasets.py to load in examples from the Quora and SemEval datasets.
+    '''
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    # Create the data and its corresponding datasets and dataloader.
+    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+
+    sst_train_data = SentenceClassificationDataset(sst_train_data, args)
+    sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
+
+    sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=sst_train_data.collate_fn)
+    sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=sst_dev_data.collate_fn)
+    sts_train_dataloader, sts_dev_dataloader = load_data(sts_train_data, sts_dev_data, args, 'sts')
+
+    # Init model.
+    config = {'hidden_dropout_prob': args.hidden_dropout_prob,
+              'num_labels': num_labels,
+              'hidden_size': 768,
+              'data_dir': '.',
+              'option': args.option}
+
+    config = SimpleNamespace(**config)
+
+    model = MultitaskBERT(config)
+    model = model.to(device)
+
+    lr = args.lr
+    optimizer = AdamW(model.parameters(), lr=lr)
+    best_dev_acc = 0
+
+    # Evaluation function for SMARTLoss
+    #eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
+
+    print("Hi! I'm pretraining now using unsupervised learning on SST! (run with finetune flag)")
+    # Create an instance of SMARTLoss
+    #smart_loss_fn = SMARTLoss(eval_fn=eval_fn, loss_fn=kl_loss, loss_last_fn=sym_kl_loss)
+    # Run for the specified number of epochs.
+
+    for epoch in range(args.epochs):
+        sst_train_loss, sst_train_acc, sst_dev_acc = train_sst_cle(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model)
+        print("Hey, I'm now going through the STS dataset ")
+        sts_train_loss, sts_train_acc, sts_dev_acc = train_sts_cle(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model)
+        print("Finished STS dataset, gonna calculate the combined accuracies")
+        dev_acc = sst_dev_acc + sts_dev_acc
+        train_acc = sst_train_acc + sts_train_acc
+        train_loss = sst_train_loss + sts_train_loss
+
+        if dev_acc > best_dev_acc:
+            best_dev_acc = dev_acc
+            save_model(model, optimizer, args, config, args.filepath)
+
+        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+    
 
 def train_multitask(args):
     '''Train MultitaskBERT.
@@ -468,6 +666,8 @@ def get_args():
     parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
     parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
+    parser.add_argument("--unsupervised", type=int, default=1)
+
 
     args = parser.parse_args()
     return args
@@ -476,7 +676,11 @@ def get_args():
 if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.option}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
-    seed_everything(args.seed)  # Fix the seed for reproducibility.
-    pretrain_unsupervised_CLE(args)
+    seed_everything(args.seed)
+    if args.unsupervised == 2: 
+        pretrain_unsupervised_CLE(args)
+    else:
+        simple_unsupervised_old(args)
+
     train_multitask(args)
     test_multitask(args)
