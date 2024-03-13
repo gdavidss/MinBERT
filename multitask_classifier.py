@@ -151,6 +151,20 @@ def save_model(model, optimizer, args, config, filepath):
     torch.save(save_info, filepath)
     print(f"save the model to {filepath}")
 
+def load_data(train_data, dev_data, args, type):
+    if type == 'sst':
+        train_data = SentenceClassificationDataset(train_data, args)
+        dev_data = SentenceClassificationDataset(dev_data, args)
+    else:
+        train_data = SentencePairDataset(train_data, args)
+        dev_data = SentencePairDataset(dev_data, args)
+
+    train_dataloader = DataLoader(train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=train_data.collate_fn)
+    dev_dataloader = DataLoader(dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=dev_data.collate_fn)
+    return train_dataloader, dev_dataloader
+
 def pretrain_supervised_CSE(args):
     ''' preTrain MultitaskBERT using supervised SIMCSE.
 
@@ -158,16 +172,10 @@ def pretrain_supervised_CSE(args):
     '''
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # Create the data and its corresponding datasets and dataloader.
-    sst_train_data, num_labels, para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    sst_dev_data, num_labels, para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+    _, num_labels, para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+    _, num_labels, para_dev_data, _ = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
 
-    sst_train_data = SentenceClassificationDataset(sst_train_data, args)
-    sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
-    
-    para_dev_dataloader = DataLoader(para_dev_data, shuffle=False, batch_size=args.batch_size,
-                                    collate_fn=para_dev_data.collate_fn)
-    para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size,
-                                    collate_fn=para_train_data.collate_fn)
+    para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
 
     # Init model.
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
@@ -190,34 +198,50 @@ def pretrain_supervised_CSE(args):
     eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
 
     print("Hi! I'm pretraining now using supervised learning! (run with finetune flag)")
-
+    """
+    Batch keys: dict_keys(['token_ids_1', 'token_type_ids_1', 'attention_mask_1', 'token_ids_2', 'token_type_ids_2', 'attention_mask_2', 'labels', 'sent_ids'])
+    """
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()
         train_loss = 0
         num_batches = 0
-        for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            b_ids, b_mask, b_labels = (batch['token_ids'], batch['attention_mask'], batch['labels'])
-
-            b_ids = b_ids.to(device)
-            b_mask = b_mask.to(device)
-            b_labels = b_labels.to(device)
+        for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+            b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'])
+            
+            b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = b_ids_1.to(device), b_mask_1.to(device), b_ids_2.to(device), b_mask_2.to(device), b_labels.to(device)
+ 
 
             optimizer.zero_grad()
-             
-            embed1 = model.forward(b_ids, b_mask)
-            embed2 = model.forward(b_ids,b_mask)
-           
-            cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
+
+            neutral_embed = model.forward(b_ids_1, b_mask_1)           
+            positive_embed = model.forward(b_ids_2, b_mask_2)
+
+             # Ensure no index remains the same (re-shuffle if necessary)
+            shuffled_indices = torch.randperm(b_ids_2.size(0))
+            while (shuffled_indices == torch.arange(b_ids_2.size(0), device=device)).any():
+                shuffled_indices = torch.randperm(b_ids_2.size(0))
+
+            # Use shuffled indices to reorder both IDs and attention masks
+            neg_ids = b_ids_2[shuffled_indices]
+            neg_mask = b_mask_2[shuffled_indices]
             
-            # print(cos_sim)
-            # print(cos_sim.shape)
-            # print(logits.shape)
-            # print(b_labels.shape)
-            # print(cos_sim.shape)
+            # Generate embeddings for negative examples
+            negative_embed = model.forward(neg_ids, neg_mask)
+
+            cos_sim_a = cosine_similarity_embedding(neutral_embed.unsqueeze(1), positive_embed.unsqueeze(0), temp = temp)
+
+            cos_sim_b = cosine_similarity_embedding(neutral_embed.unsqueeze(1), negative_embed.unsqueeze(0), temp = temp)
+
+            cos_sim = (cos_sim_a * cos_sim_b)/(cos_sim_a + cos_sim_b)
+
+            print(cos_sim)
+
             loss_function = nn.CrossEntropyLoss()
             labels = torch.arange(cos_sim.size(0)).long().to(device)
-            loss = loss_function(cos_sim,labels)
+
+            # a/(b+c) = (a/b * a/c)/(a/b + a/c) which is the loss equation for our model
+            loss = loss_function(cos_sim,b_labels)
 
             loss.backward()
             optimizer.step()
@@ -227,8 +251,8 @@ def pretrain_supervised_CSE(args):
 
         train_loss = train_loss / (num_batches)
 
-        train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
-        dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+        train_acc, train_f1, *_ = model_eval_sst(para_train_dataloader, model, device)
+        dev_acc, dev_f1, *_ = model_eval_sst(para_dev_dataloader, model, device)
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
@@ -313,7 +337,7 @@ def train_multitask_CLE(args):
             # print(cos_sim.shape)
             loss_function = nn.CrossEntropyLoss()
             labels = torch.arange(cos_sim.size(0)).long().to(device)
-            loss = loss_function(cos_sim,labels)
+            loss = loss_function(cos_sim, labels)
 
             loss.backward()
             optimizer.step()
@@ -518,15 +542,14 @@ def test_multitask(args):
             for p, s in zip(test_sts_sent_ids, test_sts_y_pred):
                 f.write(f"{p} , {s} \n")
 
-
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sst_train", type=str, default="data/ids-sst-train.csv")
     parser.add_argument("--sst_dev", type=str, default="data/ids-sst-dev.csv")
     parser.add_argument("--sst_test", type=str, default="data/ids-sst-test-student.csv")
 
-    parser.add_argument("--para_train", type=str, default="data/quora-train.csv")
-    parser.add_argument("--para_dev", type=str, default="data/quora-dev.csv")
+    parser.add_argument("--para_train", type=str, default="data/quora-train-filtered.csv")
+    parser.add_argument("--para_dev", type=str, default="data/quora-dev-filtered.csv")
     parser.add_argument("--para_test", type=str, default="data/quora-test-student.csv")
 
     parser.add_argument("--sts_train", type=str, default="data/sts-train.csv")
@@ -562,6 +585,7 @@ if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.option}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
-    train_multitask_CLE(args)
-    train_multitask(args)
-    test_multitask(args)
+    pretrain_supervised_CSE(args)
+    #train_multitask_CLE(args)
+    #train_multitask(args)
+    #test_multitask(args)
