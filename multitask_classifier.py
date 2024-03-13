@@ -219,6 +219,7 @@ def pretrain_supervised_CSE(args):
 
              # Ensure no index remains the same (re-shuffle if necessary)
             shuffled_indices = torch.randperm(b_ids_2.size(0))
+            shuffled_indices.to(device)
             while (shuffled_indices == torch.arange(b_ids_2.size(0), device=device)).any():
                 shuffled_indices = torch.randperm(b_ids_2.size(0))
 
@@ -228,20 +229,20 @@ def pretrain_supervised_CSE(args):
             
             # Generate embeddings for negative examples
             negative_embed = model.forward(neg_ids, neg_mask)
+            #neutral_embed.requires_grad = True
+            #positive_embed.requires_grad = True
+            #negative_embed.requires_grad = True
 
             cos_sim_a = cosine_similarity_embedding(neutral_embed.unsqueeze(1), positive_embed.unsqueeze(0), temp = temp)
 
             cos_sim_b = cosine_similarity_embedding(neutral_embed.unsqueeze(1), negative_embed.unsqueeze(0), temp = temp)
-
-            cos_sim = (cos_sim_a * cos_sim_b)/(cos_sim_a + cos_sim_b)
-
-            print(cos_sim)
+            
+            cos_sim = torch.cat([cos_sim_a, cos_sim_b], 1)
 
             loss_function = nn.CrossEntropyLoss()
             labels = torch.arange(cos_sim.size(0)).long().to(device)
 
-            # a/(b+c) = (a/b * a/c)/(a/b + a/c) which is the loss equation for our model
-            loss = loss_function(cos_sim,b_labels)
+            loss = loss_function(cos_sim,labels)
 
             loss.backward()
             optimizer.step()
@@ -587,5 +588,5 @@ if __name__ == "__main__":
     seed_everything(args.seed)  # Fix the seed for reproducibility.
     pretrain_supervised_CSE(args)
     #train_multitask_CLE(args)
-    #train_multitask(args)
-    #test_multitask(args)
+    train_multitask(args)
+    test_multitask(args)
