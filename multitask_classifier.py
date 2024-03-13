@@ -136,7 +136,6 @@ def cosine_similarity_embedding(embed1, embed2, temp):
     #self.cos = nn.CosineSimilarity(dim=-1)
     return F.cosine_similarity(embed1, embed2, dim=-1) / temp 
 
-
 def save_model(model, optimizer, args, config, filepath):
     save_info = {
         'model': model.state_dict(),
@@ -198,15 +197,13 @@ def pretrain_supervised_CSE(args):
     eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
 
     print("Hi! I'm pretraining now using supervised learning! (run with finetune flag)")
-    """
-    Batch keys: dict_keys(['token_ids_1', 'token_type_ids_1', 'attention_mask_1', 'token_ids_2', 'token_type_ids_2', 'attention_mask_2', 'labels', 'sent_ids'])
-    """
+
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()
         train_loss = 0
         num_batches = 0
-        for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+        for i, batch in enumerate(tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
             b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'])
             
             b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = b_ids_1.to(device), b_mask_1.to(device), b_ids_2.to(device), b_mask_2.to(device), b_labels.to(device)
@@ -217,11 +214,11 @@ def pretrain_supervised_CSE(args):
             neutral_embed = model.forward(b_ids_1, b_mask_1)           
             positive_embed = model.forward(b_ids_2, b_mask_2)
 
-             # Ensure no index remains the same (re-shuffle if necessary)
-            shuffled_indices = torch.randperm(b_ids_2.size(0))
-            shuffled_indices.to(device)
-            while (shuffled_indices == torch.arange(b_ids_2.size(0), device=device)).any():
-                shuffled_indices = torch.randperm(b_ids_2.size(0))
+            # Shuffle indices to get negative examples
+            shuffled_indices = torch.randperm(b_ids_2.size(0)).to(device)
+
+            #while (shuffled_indices == range_tensor).any():
+            #    shuffled_indices = torch.randperm(b_ids_2.size(0)).to(device)
 
             # Use shuffled indices to reorder both IDs and attention masks
             neg_ids = b_ids_2[shuffled_indices]
@@ -250,6 +247,11 @@ def pretrain_supervised_CSE(args):
             train_loss += loss.item()
             num_batches += 1
 
+            if i > 6520:
+                # print the number of the batch
+                print(f"finishing now Batch number: {i}")
+
+        print("alright acabei essa budega vamo lá")
         train_loss = train_loss / (num_batches)
 
         train_acc, train_f1, *_ = model_eval_sst(para_train_dataloader, model, device)
