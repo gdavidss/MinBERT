@@ -171,8 +171,21 @@ def pretrain_supervised_CSE(args):
     '''
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # Create the data and its corresponding datasets and dataloader.
-    _, num_labels, para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    _, num_labels, para_dev_data, _ = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+    sst_train_data, num_labels, para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+    sst_dev_data, num_labels, para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+
+    sst_train_data = SentenceClassificationDataset(sst_train_data, args)
+    sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
+
+    sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=sst_train_data.collate_fn)
+    sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=sst_dev_data.collate_fn)
+                                
+    sts_train_dataloader = DataLoader(sts_train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=sst_train_data.collate_fn)
+    sts_dev_dataloader = DataLoader(sts_dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=sst_dev_data.collate_fn)
 
     para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
 
@@ -246,23 +259,33 @@ def pretrain_supervised_CSE(args):
 
             train_loss += loss.item()
             num_batches += 1
-
-            if i > 6520:
-                # print the number of the batch
-                print(f"finishing now Batch number: {i}")
-
-        print("alright acabei essa budega vamo lá")
+        
         train_loss = train_loss / (num_batches)
 
-        train_acc, train_f1, *_ = model_eval_sst(para_train_dataloader, model, device)
-        dev_acc, dev_f1, *_ = model_eval_sst(para_dev_dataloader, model, device)
+        train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
+        dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
             save_model(model, optimizer, args, config, args.filepath)
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+        
+        """
+        train_loss = train_loss / (num_batches)
 
+        train_sentiment_accuracy, _, _, train_paraphrase_accuracy, _, _, train_sts_corr, _, _ = model_eval_multitask(sst_train_dataloader, para_train_dataloader, sts_train_dataloader, model, device)
+        
+        dev_sentiment_accuracy, _, _, dev_paraphrase_accuracy, _, _, dev_sts_corr, _, _ = model_eval_multitask(sst_dev_dataloader, para_dev_dataloader, sts_dev_dataloader, model, device)
+
+        if (dev_sentiment_accuracy + dev_paraphrase_accuracy + dev_sts_corr) > best_dev_acc:
+            best_dev_acc = (dev_sentiment_accuracy + dev_paraphrase_accuracy + dev_sts_corr)
+            save_model(model, optimizer, args, config, args.filepath)
+
+        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}")
+        print(f"Epoch {epoch}: train sentiment acc :: {train_sentiment_accuracy :.3f}, train paraphrase acc :: {train_paraphrase_accuracy :.3f}, train sts corr :: {train_sts_corr :.3f}")
+        print(f"Epoch {epoch}: dev sentiment acc :: {dev_sentiment_accuracy :.3f}, dev paraphrase acc :: {dev_paraphrase_accuracy :.3f}, dev sts corr :: {dev_sts_corr :.3f}")
+        """
 
 def train_multitask_CLE(args):
     '''Train MultitaskBERT.
