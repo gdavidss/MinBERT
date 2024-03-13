@@ -219,7 +219,7 @@ def train_sts_cle(sts_train_dataloader, sts_dev_dataloader, epoch, device, optim
         embed1 = model.forward(b_ids1, b_mask1)
         embed2 = model.forward(b_ids1,b_mask1)
         embed3 = model.forward(b_ids2,b_mask2)
-        embed4 = model.foward(b_ids2, b_mask2)
+        embed4 = model.forward(b_ids2, b_mask2)
         cos_sim1 = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
         cos_sim2 = cosine_similarity_embedding(embed3.unsqueeze(1), embed4.unsqueeze(0),temp = temp)
 
