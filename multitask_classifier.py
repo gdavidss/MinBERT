@@ -164,6 +164,52 @@ def load_data(train_data, dev_data, args, type):
                                     collate_fn=dev_data.collate_fn)
     return train_dataloader, dev_dataloader
 
+## HELPER FUNCTION for train_multitask
+def load_data(train_data, dev_data, args, type):
+    if type == 'sst':
+        train_data = SentenceClassificationDataset(train_data, args)
+        dev_data = SentenceClassificationDataset(dev_data, args)
+    else:
+        train_data = SentencePairDataset(train_data, args)
+        dev_data = SentencePairDataset(dev_data, args)
+
+    train_dataloader = DataLoader(train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=train_data.collate_fn)
+    dev_dataloader = DataLoader(dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=dev_data.collate_fn)
+    return train_dataloader, dev_dataloader
+
+def calculate_loss_supervised_simCSE(batch, device, model, temp=0.05):
+    b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'])
+            
+    b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = b_ids_1.to(device), b_mask_1.to(device), b_ids_2.to(device), b_mask_2.to(device), b_labels.to(device)
+ 
+
+    neutral_embed = model.forward(b_ids_1, b_mask_1)           
+    positive_embed = model.forward(b_ids_2, b_mask_2)
+
+    # Shuffle indices to get negative examples
+    shuffled_indices = torch.randperm(b_ids_2.size(0)).to(device)
+
+    # Use shuffled indices to reorder both IDs and attention masks
+    neg_ids = b_ids_2[shuffled_indices]
+    neg_mask = b_mask_2[shuffled_indices]
+            
+    # Generate embeddings for negative examples
+    negative_embed = model.forward(neg_ids, neg_mask)
+  
+    cos_sim_a = cosine_similarity_embedding(neutral_embed.unsqueeze(1), positive_embed.unsqueeze(0), temp = temp)
+
+    cos_sim_b = cosine_similarity_embedding(neutral_embed.unsqueeze(1), negative_embed.unsqueeze(0), temp = temp)
+            
+    cos_sim = torch.cat([cos_sim_a, cos_sim_b], 1)
+
+    loss_function = nn.CrossEntropyLoss()
+    labels = torch.arange(cos_sim.size(0)).long().to(device)
+
+    loss = loss_function(cos_sim,labels)
+    return loss
+
 def pretrain_supervised_CSE(args):
     ''' preTrain MultitaskBERT using supervised SIMCSE.
 
@@ -390,19 +436,14 @@ def train_multitask(args):
     look at test_multitask below to see how you can use the custom torch `Dataset`s
     in datasets.py to load in examples from the Quora and SemEval datasets.
     '''
+     # test hyperparameter tuning
+
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    # Create the data and its corresponding datasets and dataloaders
+    _, num_labels,para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+    _, num_labels,para_dev_data, _ = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
 
-    # Create the data and its corresponding datasets and dataloader.
-    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
-
-    sst_train_data = SentenceClassificationDataset(sst_train_data, args)
-    sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
-
-    sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
-                                      collate_fn=sst_train_data.collate_fn)
-    sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
-                                    collate_fn=sst_dev_data.collate_fn)
+    para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
 
     # Init model.
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
@@ -411,75 +452,43 @@ def train_multitask(args):
               'data_dir': '.',
               'option': args.option}
 
-    #config = SimpleNamespace(**config)
-
-    saved = torch.load(args.filepath)
-    config = saved['model_config']
-
+    config = SimpleNamespace(**config)
     model = MultitaskBERT(config)
-    model.load_state_dict(saved['model'])
     model = model.to(device)
-    print(f"Pretrained model to train from {args.filepath}")
-
-    #model = MultitaskBERT(config)
-    #model = model.to(device)
-
+    
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
     best_dev_acc = 0
+    temp = 0.05
 
-    # Evaluation function for SMARTLoss
-    #eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
-
-    # Create an instance of SMARTLoss
-    #smart_loss_fn = SMARTLoss(eval_fn=eval_fn, loss_fn=kl_loss, loss_last_fn=sym_kl_loss)
-    print("Hi! I'm loading in the weights from the pretrained model and now doing regular training")
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()
+
         train_loss = 0
         num_batches = 0
-        for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            b_ids, b_mask, b_labels = (batch['token_ids'],
-                                       batch['attention_mask'], batch['labels'])
-
-            b_ids = b_ids.to(device)
-            b_mask = b_mask.to(device)
-            b_labels = b_labels.to(device)
-
+        for i, batch in enumerate(tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
             optimizer.zero_grad()
-            logits = model.predict_sentiment(b_ids, b_mask)
-            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
-            #embed = model.forward(b_ids,b_mask)
-            #state = eval_fn(embed)
 
-            # SIMCSE: How does the loss changes?
-            # What does the training learning objective equation mean?
-            # in particular, what is 'i' in the equation? is it a single sentence or a collection of sentences?
-            # how do calculate the denominator?
-            #F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
-            
-            # SIMCSE: how do we change the training loop here to do unsurpervised learning (and perhaps in another function supervised)?
-
-            # smart_loss = smart_loss_fn(embed,state)
-            # loss += lam * smart_loss
-
+            loss = calculate_loss_supervised_simCSE(batch, device, model)
             loss.backward()
             optimizer.step()
 
             train_loss += loss.item()
             num_batches += 1
-
+           
         train_loss = train_loss / (num_batches)
-
-        train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
-        dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+        # calculate the accuracy
+        train_acc = model_eval_para(para_train_dataloader, model, device)
+        dev_acc = model_eval_para(para_dev_dataloader, model, device)
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
-            save_model(model, optimizer, args, config, args.filepath)
+            save_model(model, optimizer, args, config, args.filepath) 
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+
+    return best_dev_acc
 
 def test_multitask(args):
     '''Test and save predictions on the dev and test sets of all three tasks.'''

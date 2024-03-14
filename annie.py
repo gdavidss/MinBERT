@@ -139,9 +139,6 @@ class MultitaskBERT(nn.Module):
         cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
         return cosine_sim 
 
-
-
-
 def save_model(model, optimizer, args, config, filepath):
     save_info = {
         'model': model.state_dict(),
@@ -297,6 +294,9 @@ def calculate_loss(batch, device, model, type):
 
     return loss
 
+
+
+
 # Batching from the three datasets at the same time
 def train_multiple(sst_train_dataloader, sst_dev_dataloader, 
                    sts_train_dataloader, sts_dev_dataloader, 
@@ -336,6 +336,7 @@ def train_multiple(sst_train_dataloader, sst_dev_dataloader,
     dev_acc += model_eval_para(para_dev_dataloader, model, device)
     return train_loss, train_acc, dev_acc
 
+    
 
 def train_multitask(args):
     '''Train MultitaskBERT.
@@ -348,18 +349,9 @@ def train_multitask(args):
 
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # Create the data and its corresponding datasets and dataloaders
-    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+    _, num_labels,para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+    _, num_labels,para_dev_data, _ = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
 
-    # Truncate to make the same size
-    min_len = min(len(sst_train_data), len(sts_train_data), len(para_train_data))
-    sst_train_data = sst_train_data[:min_len]
-    sts_train_data = sts_train_data[:min_len]
-    para_train_data = para_train_data[:min_len]
-
-    # Continue with dataloading
-    sst_train_dataloader, sst_dev_dataloader = load_data(sst_train_data, sst_dev_data, args, 'sst')
-    sts_train_dataloader, sts_dev_dataloader = load_data(sts_train_data, sts_dev_data, args, 'sts')
     para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
 
     # Flag for whether to do Gradient Surgery or not
@@ -373,37 +365,36 @@ def train_multitask(args):
               'option': args.option}
 
     config = SimpleNamespace(**config)
-
     model = MultitaskBERT(config)
     model = model.to(device)
-
+    
     lr = args.lr
-    if do_grad_surgery:
-        optimizer = PCGrad(AdamW(model.parameters(), lr=lr)) 
-    else:
-        optimizer = AdamW(model.parameters(), lr=lr)
+    optimizer = AdamW(model.parameters(), lr=lr)
     best_dev_acc = 0
+    temp = 0.05
 
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()
 
-        # Training for STS (sequential version)
-        # sts_train_loss, sts_train_acc, sts_dev_acc = train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model)
-        # Training for SST
-        # sst_train_loss, sst_train_acc, sst_dev_acc = train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model)
-        # Training for Paraphrase (untested)
-        # para_train_loss, para_train_acc, para_dev_acc = train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimizer, model)
+        train_loss = 0
+        num_batches = 0
+        for i, batch in enumerate(tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
+            optimizer.zero_grad()
 
-        # Combining the different tasks
-        # dev_acc = sst_dev_acc + sts_dev_acc
-        # train_acc = sst_train_acc + sts_train_acc
-        # train_loss = sst_train_loss + sts_train_loss
+            loss = calculate_loss(batch, device, model, 'para')
 
-        train_loss, train_acc, dev_acc = train_multiple(sst_train_dataloader, sst_dev_dataloader, 
-                                                        sts_train_dataloader, sts_dev_dataloader, 
-                                                        para_train_dataloader, para_dev_dataloader,
-                                                        device, optimizer, model, do_grad_surgery)
+
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+            num_batches += 1
+           
+        train_loss = train_loss / (num_batches)
+        # calculate the accuracy
+        train_acc = model_eval_para(para_train_dataloader, model, device)
+        dev_acc = model_eval_para(para_dev_dataloader, model, device)
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
@@ -537,6 +528,139 @@ def get_args():
     args = parser.parse_args()
     return args
 
+def cosine_similarity_embedding(embed1, embed2, temp):
+    return F.cosine_similarity(embed1, embed2, dim=-1) / temp 
+
+def pretrain_supervised_CSE(args):
+    ''' preTrain MultitaskBERT using supervised SIMCSE.
+
+
+    '''
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    # Create the data and its corresponding datasets and dataloaders
+    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+
+    # Truncate to make the same size
+    min_len = min(len(sst_train_data), len(sts_train_data), len(para_train_data))
+    sst_train_data = sst_train_data[:min_len]
+    sts_train_data = sts_train_data[:min_len]
+    para_train_data = para_train_data[:min_len]
+
+    # Continue with dataloading
+    sst_train_dataloader, sst_dev_dataloader = load_data(sst_train_data, sst_dev_data, args, 'sst')
+    sts_train_dataloader, sts_dev_dataloader = load_data(sts_train_data, sts_dev_data, args, 'sts')
+    para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
+
+    # Init model.
+    config = {'hidden_dropout_prob': args.hidden_dropout_prob,
+              'num_labels': num_labels,
+              'hidden_size': 768,
+              'data_dir': '.',
+              'option': args.option}
+
+    config = SimpleNamespace(**config)
+
+    model = MultitaskBERT(config)
+    model = model.to(device)
+
+    # Init model.
+    config = {'hidden_dropout_prob': args.hidden_dropout_prob,
+              'num_labels': num_labels,
+              'hidden_size': 768,
+              'data_dir': '.',
+              'option': args.option}
+
+    config = SimpleNamespace(**config)
+
+    model = MultitaskBERT(config)
+    model = model.to(device)
+
+    lr = args.lr
+    optimizer = AdamW(model.parameters(), lr=lr)
+    best_dev_acc = 0
+    temp = 0.05
+
+    # Evaluation function for SMARTLoss
+    eval_fn = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
+
+    print("Hi! I'm pretraining now using supervised learning! (run with finetune flag)")
+
+    # Run for the specified number of epochs.
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss = 0
+        num_batches = 0
+        for i, batch in enumerate(tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
+            b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'])
+            
+            b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = b_ids_1.to(device), b_mask_1.to(device), b_ids_2.to(device), b_mask_2.to(device), b_labels.to(device)
+ 
+
+            optimizer.zero_grad()
+
+            neutral_embed = model.forward(b_ids_1, b_mask_1)           
+            positive_embed = model.forward(b_ids_2, b_mask_2)
+
+            # Shuffle indices to get negative examples
+            shuffled_indices = torch.randperm(b_ids_2.size(0)).to(device)
+
+            #while (shuffled_indices == range_tensor).any():
+            #    shuffled_indices = torch.randperm(b_ids_2.size(0)).to(device)
+
+            # Use shuffled indices to reorder both IDs and attention masks
+            neg_ids = b_ids_2[shuffled_indices]
+            neg_mask = b_mask_2[shuffled_indices]
+            
+            # Generate embeddings for negative examples
+            negative_embed = model.forward(neg_ids, neg_mask)
+            #neutral_embed.requires_grad = True
+            #positive_embed.requires_grad = True
+            #negative_embed.requires_grad = True
+
+            cos_sim_a = cosine_similarity_embedding(neutral_embed.unsqueeze(1), positive_embed.unsqueeze(0), temp = temp)
+
+            cos_sim_b = cosine_similarity_embedding(neutral_embed.unsqueeze(1), negative_embed.unsqueeze(0), temp = temp)
+            
+            cos_sim = torch.cat([cos_sim_a, cos_sim_b], 1)
+
+            loss_function = nn.CrossEntropyLoss()
+            labels = torch.arange(cos_sim.size(0)).long().to(device)
+
+            loss = loss_function(cos_sim,labels)
+
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+            num_batches += 1
+        
+        train_loss = train_loss / (num_batches)
+
+        train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
+        dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+
+        if dev_acc > best_dev_acc:
+            best_dev_acc = dev_acc
+            save_model(model, optimizer, args, config, args.filepath)
+
+        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+        
+        """
+        train_loss = train_loss / (num_batches)
+
+        train_sentiment_accuracy, _, _, train_paraphrase_accuracy, _, _, train_sts_corr, _, _ = model_eval_multitask(sst_train_dataloader, para_train_dataloader, sts_train_dataloader, model, device)
+        
+        dev_sentiment_accuracy, _, _, dev_paraphrase_accuracy, _, _, dev_sts_corr, _, _ = model_eval_multitask(sst_dev_dataloader, para_dev_dataloader, sts_dev_dataloader, model, device)
+
+        if (dev_sentiment_accuracy + dev_paraphrase_accuracy + dev_sts_corr) > best_dev_acc:
+            best_dev_acc = (dev_sentiment_accuracy + dev_paraphrase_accuracy + dev_sts_corr)
+            save_model(model, optimizer, args, config, args.filepath)
+
+        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}")
+        print(f"Epoch {epoch}: train sentiment acc :: {train_sentiment_accuracy :.3f}, train paraphrase acc :: {train_paraphrase_accuracy :.3f}, train sts corr :: {train_sts_corr :.3f}")
+        print(f"Epoch {epoch}: dev sentiment acc :: {dev_sentiment_accuracy :.3f}, dev paraphrase acc :: {dev_paraphrase_accuracy :.3f}, dev sts corr :: {dev_sts_corr :.3f}")
+        """
 
 def finetune():
    # Define ranges for each hyperparameter
