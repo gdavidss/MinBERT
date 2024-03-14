@@ -171,8 +171,12 @@ def load_data(train_data, dev_data, args, type):
                                     collate_fn=dev_data.collate_fn)
     return train_dataloader, dev_dataloader
 
+## HELPER FUNCTION: compute the cosine similarity of embeddings
+def cosine_similarity_embedding(embed1, embed2, temp):
+    return F.cosine_similarity(embed1, embed2, dim=-1) / temp 
+
 ## HELPER FUNCTION for train_multiple
-def calculate_loss(batch, device, model, type):
+def calculate_loss(batch, device, model, type, do_contrastive=False):
     if type == 'sst':
         b_ids, b_mask, b_labels = (batch['token_ids'],
                                 batch['attention_mask'], batch['labels'])
@@ -181,10 +185,19 @@ def calculate_loss(batch, device, model, type):
         b_mask = b_mask.to(device)
         b_labels = b_labels.to(device)
 
-        logits = model.predict_sentiment(b_ids, b_mask)
-        loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+        if do_contrastive:
+            temp = 0.05
+            embed1 = model.forward(b_ids, b_mask)
+            embed2 = model.forward(b_ids,b_mask)
+            cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
+            loss_function = nn.CrossEntropyLoss()
+            labels = torch.arange(cos_sim.size(0)).long().to(device)
+            loss = loss_function(cos_sim,labels)
+        else:
+            logits = model.predict_sentiment(b_ids, b_mask)
+            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
     
-    else:
+    else: # type == 'sts' or type == 'para'
         (b_ids1, b_mask1,
             b_ids2, b_mask2,
             b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
@@ -197,22 +210,35 @@ def calculate_loss(batch, device, model, type):
         b_mask2 = b_mask2.to(device)
         b_labels = b_labels.to(device)
 
-        if type == 'sts':
-            logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).to(device)
-            loss = nn.MSELoss()(logits, b_labels.float().view(-1)) / args.batch_size
+        if do_contrastive:
+            temp = 0.05
+            embed1 = model.forward(b_ids1, b_mask1)
+            embed2 = model.forward(b_ids1,b_mask1)
+            embed3 = model.forward(b_ids2,b_mask2)
+            embed4 = model.forward(b_ids2, b_mask2)
+            cos_sim1 = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
+            cos_sim2 = cosine_similarity_embedding(embed3.unsqueeze(1), embed4.unsqueeze(0),temp = temp)
+
+            loss_function = nn.CrossEntropyLoss()
+            labels = torch.arange(cos_sim1.size(0)).long().to(device)
+            loss = loss_function(cos_sim1,labels) + loss_function(cos_sim2,labels)
         else:
-            logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2).to(device)
-            loss = nn.MSELoss()(logits.sigmoid(), b_labels.float().view(-1)) / args.batch_size
+            if type == 'sts':
+                logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).to(device)
+                loss = nn.MSELoss()(logits, b_labels.float().view(-1)) / args.batch_size
+            else: # type == 'para'
+                logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2).to(device)
+                loss = nn.MSELoss()(logits.sigmoid(), b_labels.float().view(-1)) / args.batch_size
 
     return loss
 
 ## HELPER FUNCTION for train_multitask
-def train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model):
+def train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model, do_contrastive=False):
     sst_train_loss = 0
     sst_num_batches = 0
     for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
         optimizer.zero_grad()
-        loss = calculate_loss(batch, device, model, 'sst')
+        loss = calculate_loss(batch, device, model, 'sst', do_contrastive)
         loss.backward()
         optimizer.step()
 
@@ -225,12 +251,12 @@ def train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer
     return sst_train_loss, sst_train_acc, sst_dev_acc
 
 ## HELPER FUNCTION for train_multitask
-def train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model):
+def train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model, do_contrastive=False):
     sts_train_loss = 0
     sts_num_batches = 0
     for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
         optimizer.zero_grad()
-        loss = calculate_loss(batch, device, model, 'sts')
+        loss = calculate_loss(batch, device, model, 'sts', do_contrastive)
         loss.backward()
         optimizer.step()
 
@@ -243,12 +269,12 @@ def train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer
     return sts_train_loss, sts_train_acc, sts_dev_acc
 
 ## HELPER FUNCTION for train_multitask
-def train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimizer, model):
+def train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimizer, model, do_contrastive=False):
     train_loss = 0
     num_batches = 0
     for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
         optimizer.zero_grad()
-        loss = calculate_loss(batch, device, model, 'para')
+        loss = calculate_loss(batch, device, model, 'para', do_contrastive)
         loss.backward()
         optimizer.step()
 
@@ -266,23 +292,23 @@ def train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimi
 def train_multiple(sst_train_dataloader, sst_dev_dataloader, 
                    sts_train_dataloader, sts_dev_dataloader, 
                    para_train_dataloader, para_dev_dataloader,
-                   device, optimizer, model, do_grad_surgery):
+                   device, optimizer, model, do_grad_surgery, do_contrastive):
     train_loss = 0
     num_batches = 0
     for i, (batch1, batch2, batch3) in enumerate(zip(sst_train_dataloader, sts_train_dataloader, para_train_dataloader)):
         optimizer.zero_grad()
 
         if do_grad_surgery:
-            losses = [calculate_loss(batch1, device, model, 'sst'), 
-                      calculate_loss(batch2, device, model, 'sts'),
-                      calculate_loss(batch3, device, model, 'para')]
+            losses = [calculate_loss(batch1, device, model, 'sst', do_contrastive), 
+                      calculate_loss(batch2, device, model, 'sts', do_contrastive),
+                      calculate_loss(batch3, device, model, 'para', do_contrastive)]
             loss = sum(losses)
             optimizer.pc_backward(losses) # using gradient surgery
             optimizer.step()  # apply gradient step
         else:
-            loss = calculate_loss(batch1, device, model, 'sst') 
-            loss += calculate_loss(batch2, device, model, 'sts') 
-            loss += calculate_loss(batch3, device, model, 'para')
+            loss = calculate_loss(batch1, device, model, 'sst', do_contrastive) 
+            loss += calculate_loss(batch2, device, model, 'sts', do_contrastive) 
+            loss += calculate_loss(batch3, device, model, 'para', do_contrastive)
             loss.backward()
             optimizer.step()
 
@@ -292,17 +318,21 @@ def train_multiple(sst_train_dataloader, sst_dev_dataloader,
             print("100 batches processed")
 
     train_loss = train_loss / (num_batches)
-    # calculate the accuracy
-    train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
-    dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
-    train_acc += model_eval_sts(sts_train_dataloader, model, device)
-    dev_acc += model_eval_sts(sts_dev_dataloader, model, device)
-    train_acc += model_eval_para(para_train_dataloader, model, device)
-    dev_acc += model_eval_para(para_dev_dataloader, model, device)
+    # evaluate the model
+    sst_train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
+    sst_dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+    sts_train_acc = model_eval_sts(sts_train_dataloader, model, device)
+    sts_dev_acc = model_eval_sts(sts_dev_dataloader, model, device)
+    para_train_acc = model_eval_para(para_train_dataloader, model, device)
+    para_dev_acc = model_eval_para(para_dev_dataloader, model, device)
+
+    # calculate the combined accuracy
+    dev_acc = sst_dev_acc + sts_dev_acc + para_dev_acc
+    train_acc = sst_train_acc + sts_train_acc + para_train_acc
     return train_loss, train_acc, dev_acc
 
 
-def train_multitask(args, load_model=False):
+def train_multitask(args, load_model=False, do_contrastive=False):
     '''Train MultitaskBERT.
 
     Currently only trains on SST dataset. The way you incorporate training examples
@@ -353,6 +383,7 @@ def train_multitask(args, load_model=False):
         config = SimpleNamespace(**config)
         model = MultitaskBERT(config)
         model = model.to(device)
+        print("Built a new blank model")
 
     # Preparing for gradient surgery if applicable
     lr = args.lr
@@ -368,12 +399,9 @@ def train_multitask(args, load_model=False):
 
         # Training Sequential Version
         if do_sequential:
-            # Training for STS
-            sts_train_loss, sts_train_acc, sts_dev_acc = train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model)
-            # Training for SST
-            sst_train_loss, sst_train_acc, sst_dev_acc = train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model)
-            # Training for Paraphrase (untested)
-            para_train_loss, para_train_acc, para_dev_acc = train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimizer, model)
+            sts_train_loss, sts_train_acc, sts_dev_acc = train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model, do_contrastive)
+            sst_train_loss, sst_train_acc, sst_dev_acc = train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model, do_contrastive)
+            para_train_loss, para_train_acc, para_dev_acc = train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimizer, model, do_contrastive)
 
             # Combining the different tasks
             dev_acc = sst_dev_acc + sts_dev_acc + para_dev_acc
@@ -385,146 +413,13 @@ def train_multitask(args, load_model=False):
             train_loss, train_acc, dev_acc = train_multiple(sst_train_dataloader, sst_dev_dataloader, 
                                                             sts_train_dataloader, sts_dev_dataloader, 
                                                             para_train_dataloader, para_dev_dataloader,
-                                                            device, optimizer, model, do_grad_surgery)
+                                                            device, optimizer, model, do_grad_surgery, do_contrastive)
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
             save_model(model, optimizer, args, config, args.filepath) 
 
-        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
-
-## HELPER FUNCTION: compute the cosine similarity of embeddings
-def cosine_similarity_embedding(embed1, embed2, temp):
-    return F.cosine_similarity(embed1, embed2, dim=-1) / temp 
-
-## HELPER FUNCTION: In an epoch, loops through each batch of SST dataset
-def train_sst_cle(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model):
-    sst_train_loss = 0
-    sst_num_batches = 0
-    temp = 0.05
-
-    for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-        b_ids, b_mask, b_labels = (batch['token_ids'],
-                                batch['attention_mask'], batch['labels'])
-        
-        b_ids = b_ids.to(device)
-        b_mask = b_mask.to(device)
-        b_labels = b_labels.to(device)
-
-        optimizer.zero_grad()
-        embed1 = model.forward(b_ids, b_mask)
-        embed2 = model.forward(b_ids,b_mask)
-        cos_sim = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
-        loss_function = nn.CrossEntropyLoss()
-        labels = torch.arange(cos_sim.size(0)).long().to(device)
-        loss = loss_function(cos_sim,labels)
-        loss.backward()
-        optimizer.step()
-
-        sst_train_loss += loss.item()
-        sst_num_batches += 1
-
-    sst_train_loss = sst_train_loss / (sst_num_batches)
-    sst_train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
-    sst_dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
-    return sst_train_loss, sst_train_acc, sst_dev_acc
-
-## HELPER FUNCTION: In an epoch, loops through each batch of SST dataset
-def train_sts_cle(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model):
-    sts_train_loss = 0
-    sts_num_batches = 0
-    temp = 0.05
-    for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-        (b_ids1, b_mask1,
-            b_ids2, b_mask2,
-            b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
-                        batch['token_ids_2'], batch['attention_mask_2'],
-                        batch['labels'], batch['sent_ids'])
-
-        b_ids1 = b_ids1.to(device)
-        b_mask1 = b_mask1.to(device)
-        b_ids2 = b_ids2.to(device)
-        b_mask2 = b_mask2.to(device)
-        b_labels = b_labels.to(device)
-
-        optimizer.zero_grad()
-        embed1 = model.forward(b_ids1, b_mask1)
-        embed2 = model.forward(b_ids1,b_mask1)
-        embed3 = model.forward(b_ids2,b_mask2)
-        embed4 = model.forward(b_ids2, b_mask2)
-        cos_sim1 = cosine_similarity_embedding(embed1.unsqueeze(1), embed2.unsqueeze(0),temp = temp)
-        cos_sim2 = cosine_similarity_embedding(embed3.unsqueeze(1), embed4.unsqueeze(0),temp = temp)
-
-        loss_function = nn.CrossEntropyLoss()
-        labels = torch.arange(cos_sim1.size(0)).long().to(device)
-        #unaltered version
-        #loss = loss_function(cos_sim1,labels)
-        #altered version 
-        loss = loss_function(cos_sim1,labels) + loss_function(cos_sim2,labels)
-
-        loss.backward()
-        optimizer.step()
-
-        sts_train_loss += loss.item()
-        sts_num_batches += 1
-
-    sts_train_loss = sts_train_loss / (sts_num_batches)
-    sts_train_acc = model_eval_sts(sts_train_dataloader, model, device)
-    sts_dev_acc = model_eval_sts(sts_dev_dataloader, model, device)
-    return sts_train_loss, sts_train_acc, sts_dev_acc
-
-
-# For Contrastive Learning 
-def pretrain_unsupervised_CLE(args):
-    '''
-    Pretrain MultitaskBERT using unsupervised contrastive learning on SST and STS datasets.
-    '''
-    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-    # Create the data and its corresponding datasets and dataloader.
-    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
-
-    sst_train_data = SentenceClassificationDataset(sst_train_data, args)
-    sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
-
-    sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
-                                      collate_fn=sst_train_data.collate_fn)
-    sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
-                                    collate_fn=sst_dev_data.collate_fn)
-    sts_train_dataloader, sts_dev_dataloader = load_data(sts_train_data, sts_dev_data, args, 'sts')
-
-    # Init model.
-    config = {'hidden_dropout_prob': args.hidden_dropout_prob,
-              'num_labels': num_labels,
-              'hidden_size': 768,
-              'data_dir': '.',
-              'option': args.option}
-
-    config = SimpleNamespace(**config)
-
-    model = MultitaskBERT(config)
-    model = model.to(device)
-
-    lr = args.lr
-    optimizer = AdamW(model.parameters(), lr=lr)
-    best_dev_acc = 0
-
-    print("Hi! I'm pretraining now using unsupervised learning on SST! (run with finetune flag)")
-
-    for epoch in range(args.epochs):
-        sst_train_loss, sst_train_acc, sst_dev_acc = train_sst_cle(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model)
-        print("Hey, I'm now going through the STS dataset ")
-        sts_train_loss, sts_train_acc, sts_dev_acc = train_sts_cle(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model)
-        print("Finished STS dataset, gonna calculate the combined accuracies")
-        dev_acc = sst_dev_acc + sts_dev_acc
-        train_acc = sst_train_acc + sts_train_acc
-        train_loss = sst_train_loss + sts_train_loss
-
-        if dev_acc > best_dev_acc:
-            best_dev_acc = dev_acc
-            save_model(model, optimizer, args, config, args.filepath)
-
-        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+        print(f"Epoch {epoch}: Summed train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
 
 def test_multitask(args):
@@ -660,7 +555,7 @@ if __name__ == "__main__":
 
     do_contrastive = True # Flage for contrastive learning
     if do_contrastive:
-        pretrain_unsupervised_CLE(args) # contrastive learning
-    train_multitask(args, do_contrastive) # multitask learning
+         train_multitask(args, load_model=False, do_contrastive=True) # multitask learning
+    train_multitask(args, load_model=True, do_contrastive=False) # multitask learning
 
     test_multitask(args)
