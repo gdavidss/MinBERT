@@ -294,9 +294,6 @@ def calculate_loss(batch, device, model, type):
 
     return loss
 
-
-
-
 # Batching from the three datasets at the same time
 def train_multiple(sst_train_dataloader, sst_dev_dataloader, 
                    sts_train_dataloader, sts_dev_dataloader, 

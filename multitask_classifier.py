@@ -440,7 +440,7 @@ def train_multitask(args):
 
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # Create the data and its corresponding datasets and dataloaders
-    _, num_labels,para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+    sst_, num_labels,para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
     _, num_labels,para_dev_data, _ = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
 
     para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
@@ -452,9 +452,13 @@ def train_multitask(args):
               'data_dir': '.',
               'option': args.option}
 
-    config = SimpleNamespace(**config)
+    saved = torch.load(args.filepath)
+    config = saved['model_config']
+
     model = MultitaskBERT(config)
+    model.load_state_dict(saved['model'])
     model = model.to(device)
+    print(f"Pretrained model to train from {args.filepath}")
     
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
