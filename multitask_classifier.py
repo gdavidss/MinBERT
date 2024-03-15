@@ -74,7 +74,8 @@ class MultitaskBERT(nn.Module):
         ### TODO
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
         self.fc = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
-        self.fc2 = torch.nn.Linear(config.hidden_size, 2)
+        self.fc_paraphrase = torch.nn.Linear(config.hidden_size, config.hidden_size)
+        self.fc_similarity = torch.nn.Linear(config.hidden_size, config.hidden_size)
 
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
@@ -110,8 +111,17 @@ class MultitaskBERT(nn.Module):
         ### TODO
         output_1 = self.forward(input_ids_1, attention_mask_1)
         output_2 = self.forward(input_ids_2, attention_mask_2)
-        logits = torch.sum(output_1 * output_2, dim=1)
-        return logits
+        #linear layer that outputs the same dimension, output dimension should be hidden size
+        linear_1 = self.fc_paraphrase(self.dropout(output_1))
+        linear_2 = self.fc_paraphrase(self.dropout(output_2))
+
+        output_1_norm = F.normalize(linear_1, p=2, dim=1)
+        output_2_norm = F.normalize(linear_2, p=2, dim=1)
+
+        # Compute cosine similarity
+        cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
+        
+        return cosine_sim
     
         # concatenate the two embeddings
         # output = self.forward(input_ids_1 + input_ids_2, attention_mask_1 + attention_mask_2)
@@ -128,8 +138,16 @@ class MultitaskBERT(nn.Module):
         ### TODO
         output_1 = self.forward(input_ids_1, attention_mask_1)
         output_2 = self.forward(input_ids_2, attention_mask_2)
-        logits = torch.sum(output_1 * output_2, dim=1)
-        return logits
+
+        linear_1 = self.fc_similarity(self.dropout(output_1))
+        linear_2 = self.fc_similarity(self.dropout(output_2))
+
+        output_1_norm = F.normalize(linear_1, p=2, dim=1)
+        output_2_norm = F.normalize(linear_2, p=2, dim=1)
+        
+        # Compute cosine similarity
+        cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
+        return cosine_sim 
 
 def cosine_similarity_embedding(embed1, embed2, temp):
     #cls.sim = Similarity(temp=cls.model_args.temp)
@@ -551,6 +569,78 @@ def train_multitask(args):
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
+def regular_train_multitask(args):
+    '''Train MultitaskBERT.
+
+    Currently only trains on SST dataset. The way you incorporate training examples
+    from other datasets into the training procedure is up to you. To begin, take a
+    look at test_multitask below to see how you can use the custom torch `Dataset`s
+    in datasets.py to load in examples from the Quora and SemEval datasets.
+    '''
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    # Create the data and its corresponding datasets and dataloader.
+    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+
+    sst_train_data = SentenceClassificationDataset(sst_train_data, args)
+    sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
+
+    sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=sst_train_data.collate_fn)
+    sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=sst_dev_data.collate_fn)
+
+    # Init model.
+    config = {'hidden_dropout_prob': args.hidden_dropout_prob,
+              'num_labels': num_labels,
+              'hidden_size': 768,
+              'data_dir': '.',
+              'option': args.option}
+
+    config = SimpleNamespace(**config)
+
+    model = MultitaskBERT(config)
+    model = model.to(device)
+
+    lr = args.lr
+    optimizer = AdamW(model.parameters(), lr=lr)
+    best_dev_acc = 0
+
+    # Run for the specified number of epochs.
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss = 0
+        num_batches = 0
+        for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+            b_ids, b_mask, b_labels = (batch['token_ids'],
+                                       batch['attention_mask'], batch['labels'])
+
+            b_ids = b_ids.to(device)
+            b_mask = b_mask.to(device)
+            b_labels = b_labels.to(device)
+
+            optimizer.zero_grad()
+            logits = model.predict_sentiment(b_ids, b_mask)
+            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+            num_batches += 1
+
+        train_loss = train_loss / (num_batches)
+
+        train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
+        dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+
+        if dev_acc > best_dev_acc:
+            best_dev_acc = dev_acc
+            save_model(model, optimizer, args, config, args.filepath)
+
+        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+
+
 def test_multitask(args):
     '''Test and save predictions on the dev and test sets of all three tasks.'''
     with torch.no_grad():
@@ -673,7 +763,7 @@ def get_args():
     parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
     parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
-    parser.add_argument("--unsupervised", type=int, default=1)
+    parser.add_argument("--unsupervised", type=int, default=0)
 
 
     args = parser.parse_args()
@@ -686,8 +776,9 @@ if __name__ == "__main__":
     seed_everything(args.seed)
     if args.unsupervised == 2: 
         pretrain_unsupervised_CLE(args)
-    else:
-        simple_unsupervised_old(args)
-
-    train_multitask(args)
+    elif args.unsupervised == 1:
+        simple_unsupervised_CLE(args)
+    
+    print("Hi! I'm running regular training with the edited classification heads now")
+    regular_train_multitask(args)
     test_multitask(args)
