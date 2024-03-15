@@ -589,10 +589,10 @@ if __name__ == "__main__":
         #supervised contrastive learning         
         #train_multitask(args, load_model = False, epochs = 2, unsupervised = False, supervised = True)
         #unsupervised contrastive learning 
-        print("hey! I am now doing unsupervised contrastive pretraining")
-        train_multitask(args, load_model=True, epochs = 2, unsupervised=True, supervised = False) 
+        #print("hey! I am now doing unsupervised contrastive pretraining")
+        #train_multitask(args, load_model=True, epochs = 2, unsupervised=True, supervised = False) 
     #multitask learning
     print("Hey! Now I am training on the task")
-    train_multitask(args, load_model=True, epochs = args.epochs, unsupervised=False, supervised = False) 
+    train_multitask(args, load_model=False, epochs = args.epochs, unsupervised=False, supervised = False) 
 
     test_multitask(args)
