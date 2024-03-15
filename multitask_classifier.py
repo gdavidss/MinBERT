@@ -74,8 +74,8 @@ class MultitaskBERT(nn.Module):
         ### TODO
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
         self.fc = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
-        self.fc_paraphrase = torch.nn.Linear(config.hidden_size, config.hidden_size)
-        self.fc_similarity = torch.nn.Linear(config.hidden_size, config.hidden_size)
+        self.fc_paraphrase = torch.nn.Linear(config.hidden_size*2, 1)
+        self.fc_similarity = torch.nn.Linear(config.hidden_size*2, 1)
 
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
@@ -112,16 +112,19 @@ class MultitaskBERT(nn.Module):
         output_1 = self.forward(input_ids_1, attention_mask_1)
         output_2 = self.forward(input_ids_2, attention_mask_2)
         #linear layer that outputs the same dimension, output dimension should be hidden size
-        linear_1 = self.fc_paraphrase(self.dropout(output_1))
-        linear_2 = self.fc_paraphrase(self.dropout(output_2))
+        output = torch.cat((output_1, output_2), dim = 1)
+        logits = self.fc_paraphrase(self.dropout(output))
 
-        output_1_norm = F.normalize(linear_1, p=2, dim=1)
-        output_2_norm = F.normalize(linear_2, p=2, dim=1)
+        # linear_1 = self.fc_paraphrase(self.dropout(output_1))
+        # linear_2 = self.fc_paraphrase(self.dropout(output_2))
 
-        # Compute cosine similarity
-        cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
+        # output_1_norm = F.normalize(linear_1, p=2, dim=1)
+        # output_2_norm = F.normalize(linear_2, p=2, dim=1)
+
+        # # Compute cosine similarity
+        # cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
         
-        return cosine_sim
+        return logits
     
         # concatenate the two embeddings
         # output = self.forward(input_ids_1 + input_ids_2, attention_mask_1 + attention_mask_2)
@@ -139,15 +142,20 @@ class MultitaskBERT(nn.Module):
         output_1 = self.forward(input_ids_1, attention_mask_1)
         output_2 = self.forward(input_ids_2, attention_mask_2)
 
-        linear_1 = self.fc_similarity(self.dropout(output_1))
-        linear_2 = self.fc_similarity(self.dropout(output_2))
+        #big feature
+        output = torch.cat((output_1, output_2), dim = 1)
+        logits = self.fc_similarity(self.dropout(output))
+        # FC(torch.cat)
 
-        output_1_norm = F.normalize(linear_1, p=2, dim=1)
-        output_2_norm = F.normalize(linear_2, p=2, dim=1)
+        # linear_1 = self.fc_similarity(self.dropout(output_1))
+        # linear_2 = self.fc_similarity(self.dropout(output_2))
+
+        # output_1_norm = F.normalize(linear_1, p=2, dim=1)
+        # output_2_norm = F.normalize(linear_2, p=2, dim=1)
         
         # Compute cosine similarity
-        cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
-        return cosine_sim 
+        # cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
+        return logits 
 
 def cosine_similarity_embedding(embed1, embed2, temp):
     #cls.sim = Similarity(temp=cls.model_args.temp)
