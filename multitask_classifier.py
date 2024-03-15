@@ -75,8 +75,8 @@ class MultitaskBERT(nn.Module):
         ### TODO
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
         self.fc = torch.nn.Linear(config.hidden_size, N_SENTIMENT_CLASSES)
-        self.fc_paraphrase = torch.nn.Linear(1, 2)
-        self.fc_similarity = torch.nn.Linear(1, 5)
+        self.fc_paraphrase = torch.nn.Linear(config.hidden_size, config.hidden_size)
+        self.fc_similarity = torch.nn.Linear(config.hidden_size, config.hidden_size)
 
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
@@ -112,12 +112,16 @@ class MultitaskBERT(nn.Module):
         ### TODO
         output_1 = self.forward(input_ids_1, attention_mask_1)
         output_2 = self.forward(input_ids_2, attention_mask_2)
+        #linear layer that outputs the same dimension, output dimension should be hidden size
+        linear_1 = self.fc_paraphrase(output_1)
+        linear_2 = self.fc_paraphrase(output_2)
 
-        output_1_norm = F.normalize(output_1, p=2, dim=1)
-        output_2_norm = F.normalize(output_2, p=2, dim=1)
+        output_1_norm = F.normalize(linear_1, p=2, dim=1)
+        output_2_norm = F.normalize(linear_2, p=2, dim=1)
 
         # Compute cosine similarity
         cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
+        
         return cosine_sim
     
 
@@ -132,8 +136,11 @@ class MultitaskBERT(nn.Module):
         output_1 = self.forward(input_ids_1, attention_mask_1)
         output_2 = self.forward(input_ids_2, attention_mask_2)
 
-        output_1_norm = F.normalize(output_1, p=2, dim=1)
-        output_2_norm = F.normalize(output_2, p=2, dim=1)
+        linear_1 = self.fc_similarity(output_1)
+        linear_2 = self.fc_similarity(output_2)
+
+        output_1_norm = F.normalize(linear_1, p=2, dim=1)
+        output_2_norm = F.normalize(linear_2, p=2, dim=1)
         
         # Compute cosine similarity
         cosine_sim = torch.sum(output_1_norm * output_2_norm, dim=1)
@@ -176,7 +183,7 @@ def cosine_similarity_embedding(embed1, embed2, temp):
     return F.cosine_similarity(embed1, embed2, dim=-1) / temp 
 
 ## HELPER FUNCTION for train_multiple
-def calculate_loss(batch, device, model, type, do_contrastive=False):
+def calculate_loss(batch, device, model, type, unsupervised=False, supervised =False):
     if type == 'sst':
         b_ids, b_mask, b_labels = (batch['token_ids'],
                                 batch['attention_mask'], batch['labels'])
@@ -185,7 +192,7 @@ def calculate_loss(batch, device, model, type, do_contrastive=False):
         b_mask = b_mask.to(device)
         b_labels = b_labels.to(device)
 
-        if do_contrastive:
+        if unsupervised:
             temp = 0.05
             embed1 = model.forward(b_ids, b_mask)
             embed2 = model.forward(b_ids,b_mask)
@@ -210,7 +217,7 @@ def calculate_loss(batch, device, model, type, do_contrastive=False):
         b_mask2 = b_mask2.to(device)
         b_labels = b_labels.to(device)
 
-        if do_contrastive:
+        if unsupervised == True:
             temp = 0.05
             embed1 = model.forward(b_ids1, b_mask1)
             embed2 = model.forward(b_ids1,b_mask1)
@@ -222,6 +229,26 @@ def calculate_loss(batch, device, model, type, do_contrastive=False):
             loss_function = nn.CrossEntropyLoss()
             labels = torch.arange(cos_sim1.size(0)).long().to(device)
             loss = loss_function(cos_sim1,labels) + loss_function(cos_sim2,labels)
+        elif supervised == True:
+            temp = 0.05
+            neutral_embed = model.forward(b_ids1, b_mask1)           
+            positive_embed = model.forward(b_ids2, b_mask2)
+            # Shuffle indices to get negative examples
+            shuffled_indices = torch.randperm(b_ids2.size(0)).to(device)
+
+            # Use shuffled indices to reorder both IDs and attention masks
+            neg_ids = b_ids2[shuffled_indices]
+            neg_mask = b_mask2[shuffled_indices]
+            
+            # Generate embeddings for negative examples
+            negative_embed = model.forward(neg_ids, neg_mask)
+
+            cos_sim_a = cosine_similarity_embedding(neutral_embed.unsqueeze(1), positive_embed.unsqueeze(0), temp = temp)
+            cos_sim_b = cosine_similarity_embedding(neutral_embed.unsqueeze(1), negative_embed.unsqueeze(0), temp = temp)
+            cos_sim = torch.cat([cos_sim_a, cos_sim_b], 1)
+            loss_function = nn.CrossEntropyLoss()
+            labels = torch.arange(cos_sim.size(0)).long().to(device)
+            loss = loss_function(cos_sim,labels)
         else:
             if type == 'sts':
                 logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).to(device)
@@ -233,12 +260,12 @@ def calculate_loss(batch, device, model, type, do_contrastive=False):
     return loss
 
 ## HELPER FUNCTION for train_multitask
-def train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model, do_contrastive=False):
+def train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model, unsupervised=False,supervised = False):
     sst_train_loss = 0
     sst_num_batches = 0
     for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
         optimizer.zero_grad()
-        loss = calculate_loss(batch, device, model, 'sst', do_contrastive)
+        loss = calculate_loss(batch, device, model, 'sst', unsupervised,supervised)
         loss.backward()
         optimizer.step()
 
@@ -251,12 +278,12 @@ def train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer
     return sst_train_loss, sst_train_acc, sst_dev_acc
 
 ## HELPER FUNCTION for train_multitask
-def train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model, do_contrastive=False):
+def train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model, unsupervised=False,supervised = False):
     sts_train_loss = 0
     sts_num_batches = 0
     for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
         optimizer.zero_grad()
-        loss = calculate_loss(batch, device, model, 'sts', do_contrastive)
+        loss = calculate_loss(batch, device, model, 'sts', unsupervised, supervised)
         loss.backward()
         optimizer.step()
 
@@ -269,12 +296,12 @@ def train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer
     return sts_train_loss, sts_train_acc, sts_dev_acc
 
 ## HELPER FUNCTION for train_multitask
-def train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimizer, model, do_contrastive=False):
+def train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimizer, model, unsupervised=False,supervised = False):
     train_loss = 0
     num_batches = 0
     for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
         optimizer.zero_grad()
-        loss = calculate_loss(batch, device, model, 'para', do_contrastive)
+        loss = calculate_loss(batch, device, model, 'para', unsupervised,supervised)
         loss.backward()
         optimizer.step()
 
@@ -292,23 +319,23 @@ def train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimi
 def train_multiple(sst_train_dataloader, sst_dev_dataloader, 
                    sts_train_dataloader, sts_dev_dataloader, 
                    para_train_dataloader, para_dev_dataloader,
-                   device, optimizer, model, do_grad_surgery, do_contrastive):
+                   device, optimizer, model, do_grad_surgery, unsupervised,supervised):
     train_loss = 0
     num_batches = 0
     for i, (batch1, batch2, batch3) in enumerate(zip(sst_train_dataloader, sts_train_dataloader, para_train_dataloader)):
         optimizer.zero_grad()
 
         if do_grad_surgery:
-            losses = [calculate_loss(batch1, device, model, 'sst', do_contrastive), 
-                      calculate_loss(batch2, device, model, 'sts', do_contrastive),
-                      calculate_loss(batch3, device, model, 'para', do_contrastive)]
+            losses = [calculate_loss(batch1, device, model, 'sst', unsupervised,supervised), 
+                      calculate_loss(batch2, device, model, 'sts', unsupervised,supervised),
+                      calculate_loss(batch3, device, model, 'para', unsupervised,supervised)]
             loss = sum(losses)
             optimizer.pc_backward(losses) # using gradient surgery
             optimizer.step()  # apply gradient step
         else:
-            loss = calculate_loss(batch1, device, model, 'sst', do_contrastive) 
-            loss += calculate_loss(batch2, device, model, 'sts', do_contrastive) 
-            loss += calculate_loss(batch3, device, model, 'para', do_contrastive)
+            loss = calculate_loss(batch1, device, model, 'sst', unsupervised,supervised) 
+            loss += calculate_loss(batch2, device, model, 'sts', unsupervised,supervised) 
+            loss += calculate_loss(batch3, device, model, 'para', unsupervised,supervised)
             loss.backward()
             optimizer.step()
 
@@ -332,7 +359,7 @@ def train_multiple(sst_train_dataloader, sst_dev_dataloader,
     return train_loss, train_acc, dev_acc
 
 
-def train_multitask(args, load_model=False, do_contrastive=False):
+def train_multitask(args, load_model=False, unsupervised=False,supervised = False, epochs = 10):
     '''Train MultitaskBERT.
 
     Currently only trains on SST dataset. The way you incorporate training examples
@@ -394,14 +421,14 @@ def train_multitask(args, load_model=False, do_contrastive=False):
     best_dev_acc = 0
 
     # Run for the specified number of epochs.
-    for epoch in range(args.epochs):
+    for epoch in range(epochs):
         model.train()
 
         # Training Sequential Version
         if do_sequential:
-            sts_train_loss, sts_train_acc, sts_dev_acc = train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model, do_contrastive)
-            sst_train_loss, sst_train_acc, sst_dev_acc = train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model, do_contrastive)
-            para_train_loss, para_train_acc, para_dev_acc = train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimizer, model, do_contrastive)
+            sts_train_loss, sts_train_acc, sts_dev_acc = train_sts(sts_train_dataloader, sts_dev_dataloader, epoch, device, optimizer, model, unsupervised,supervised)
+            sst_train_loss, sst_train_acc, sst_dev_acc = train_sst(sst_train_dataloader, sst_dev_dataloader, epoch, device, optimizer, model, unsupervised,supervised)
+            para_train_loss, para_train_acc, para_dev_acc = train_para(para_train_dataloader, para_dev_dataloader, epoch, device, optimizer, model, unsupervised, supervised)
 
             # Combining the different tasks
             dev_acc = sst_dev_acc + sts_dev_acc + para_dev_acc
@@ -413,7 +440,7 @@ def train_multitask(args, load_model=False, do_contrastive=False):
             train_loss, train_acc, dev_acc = train_multiple(sst_train_dataloader, sst_dev_dataloader, 
                                                             sts_train_dataloader, sts_dev_dataloader, 
                                                             para_train_dataloader, para_dev_dataloader,
-                                                            device, optimizer, model, do_grad_surgery, do_contrastive)
+                                                            device, optimizer, model, do_grad_surgery, unsupervised,supervised)
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
@@ -553,9 +580,16 @@ if __name__ == "__main__":
     args.filepath = f'{args.option}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
 
-    do_contrastive = True # Flage for contrastive learning
+    do_contrastive = True # Flag for contrastive learning
     if do_contrastive:
-         train_multitask(args, load_model=False, do_contrastive=True) # multitask learning
-    train_multitask(args, load_model=True, do_contrastive=False) # multitask learning
+        print("hey! I'm doing supervised contrastive pretraining")
+        #supervised contrastive learning         
+        #train_multitask(args, load_model = False, epochs = 2, unsupervised = False, supervised = True)
+        #unsupervised contrastive learning 
+        print("hey! I am now doing unsupervised contrastive pretraining")
+        train_multitask(args, load_model=True, epochs = 2, unsupervised=True, supervised = False) 
+    #multitask learning
+    print("Hey! Now I am training on the task")
+    train_multitask(args, load_model=True, epochs = args.epochs, unsupervised=False, supervised = False) 
 
     test_multitask(args)
