@@ -140,8 +140,6 @@ class MultitaskBERT(nn.Module):
         return cosine_sim 
 
 
-
-
 def save_model(model, optimizer, args, config, filepath):
     save_info = {
         'model': model.state_dict(),
@@ -312,6 +310,7 @@ def train_multitask(args, load_model=False):
     '''
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
 
+
     # Flag for whether to do Gradient Surgery or not
     do_grad_surgery = False
     # Flag for whether to do Sequential or Concurrent Training
@@ -342,10 +341,22 @@ def train_multitask(args, load_model=False):
 
     if load_model:
         # Option 1: load in pretrained model
-        saved = torch.load(args.filepath)
-        config = saved['model_config']
+        #saved = torch.load(args.filepath)
+        saved = torch.load(args.filepath, map_location=torch.device('cpu'))
+        config = saved['model_config'] 
+
         model = MultitaskBERT(config)
-        model.load_state_dict(saved['model'])
+        model_state_dict = saved['model']  # This contains the model parameters
+        
+        model_state_dict['fc_paraphrase.weight'] = saved['model']['fc2.weight']
+        fc_paraphrase_weight = model_state_dict['fc_paraphrase.weight']
+        fc_paraphrase_weight_resized = fc_paraphrase_weight[:, :1] 
+        model_state_dict['fc_paraphrase.weight'] = fc_paraphrase_weight_resized
+        
+        model_state_dict['fc_paraphrase.bias'] = saved['model']['fc2.bias']
+        model.load_state_dict(model_state_dict, strict=False)
+        
+        #model.load_state_dict(saved['model'])
         model = model.to(device)
         print(f"Pretrained model to train from {args.filepath}")
     else:
@@ -652,15 +663,14 @@ def get_args():
     args = parser.parse_args()
     return args
 
-
 if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.option}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
 
-    do_contrastive = True # Flage for contrastive learning
+    do_contrastive = False # Flage for contrastive learning
     if do_contrastive:
         pretrain_unsupervised_CLE(args) # contrastive learning
-    train_multitask(args, do_contrastive) # multitask learning
+    train_multitask(args, load_model=True) # multitask learning
 
     test_multitask(args)
