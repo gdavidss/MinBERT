@@ -28,8 +28,10 @@ from datasets import (
     SentenceClassificationDataset,
     SentenceClassificationTestDataset,
     SentencePairDataset,
+    SentenceTripleDataset,
     SentencePairTestDataset,
-    load_multitask_data
+    load_multitask_data,
+    load_multitask_data_supervised
 )
 
 from evaluation import model_eval_sst, model_eval_multitask, model_eval_test_multitask
@@ -132,8 +134,6 @@ class MultitaskBERT(nn.Module):
         return logits
 
 def cosine_similarity_embedding(embed1, embed2, temp):
-    #cls.sim = Similarity(temp=cls.model_args.temp)
-    #self.cos = nn.CosineSimilarity(dim=-1)
     return F.cosine_similarity(embed1, embed2, dim=-1) / temp 
 
 def save_model(model, optimizer, args, config, filepath):
@@ -179,37 +179,6 @@ def load_data(train_data, dev_data, args, type):
                                     collate_fn=dev_data.collate_fn)
     return train_dataloader, dev_dataloader
 
-def calculate_loss_supervised_simCSE(batch, device, model, temp=0.05):
-    b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'])
-            
-    b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = b_ids_1.to(device), b_mask_1.to(device), b_ids_2.to(device), b_mask_2.to(device), b_labels.to(device)
- 
-
-    neutral_embed = model.forward(b_ids_1, b_mask_1)           
-    positive_embed = model.forward(b_ids_2, b_mask_2)
-
-    # Shuffle indices to get negative examples
-    shuffled_indices = torch.randperm(b_ids_2.size(0)).to(device)
-
-    # Use shuffled indices to reorder both IDs and attention masks
-    neg_ids = b_ids_2[shuffled_indices]
-    neg_mask = b_mask_2[shuffled_indices]
-            
-    # Generate embeddings for negative examples
-    negative_embed = model.forward(neg_ids, neg_mask)
-  
-    cos_sim_a = cosine_similarity_embedding(neutral_embed.unsqueeze(1), positive_embed.unsqueeze(0), temp = temp)
-
-    cos_sim_b = cosine_similarity_embedding(neutral_embed.unsqueeze(1), negative_embed.unsqueeze(0), temp = temp)
-            
-    cos_sim = torch.cat([cos_sim_a, cos_sim_b], 1)
-
-    loss_function = nn.CrossEntropyLoss()
-    labels = torch.arange(cos_sim.size(0)).long().to(device)
-
-    loss = loss_function(cos_sim,labels)
-    return loss
-
 def pretrain_supervised_CSE(args):
     ''' preTrain MultitaskBERT using supervised SIMCSE.
 
@@ -217,8 +186,8 @@ def pretrain_supervised_CSE(args):
     '''
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # Create the data and its corresponding datasets and dataloader.
-    sst_train_data, num_labels, para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    sst_dev_data, num_labels, para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+    sst_train_data, num_labels, para_train_data, sts_train_data = load_multitask_data_supervised(args.sst_train,args.para_train,args.sts_train, split ='train')
+    sst_dev_data, num_labels, para_dev_data, sts_dev_data = load_multitask_data_supervised(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
 
     sst_train_data = SentenceClassificationDataset(sst_train_data, args)
     sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
@@ -227,13 +196,21 @@ def pretrain_supervised_CSE(args):
                                       collate_fn=sst_train_data.collate_fn)
     sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
                                     collate_fn=sst_dev_data.collate_fn)
-                                
+
+    train_data = SentenceTripleDataset(para_train_data, args)
+    dev_data = SentenceTripleDataset(para_dev_data, args)
+
+    para_train_dataloader = DataLoader(train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=train_data.collate_fn)
+    para_dev_dataloader = DataLoader(dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=dev_data.collate_fn)
+     
     sts_train_dataloader = DataLoader(sts_train_data, shuffle=True, batch_size=args.batch_size,
                                       collate_fn=sst_train_data.collate_fn)
     sts_dev_dataloader = DataLoader(sts_dev_data, shuffle=False, batch_size=args.batch_size,
                                     collate_fn=sst_dev_data.collate_fn)
 
-    para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
+    #para_train_dataloader, para_dev_dataloader = load_data(para_train_data, para_dev_data, args, 'para')
 
     # Init model.
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
@@ -263,34 +240,17 @@ def pretrain_supervised_CSE(args):
         train_loss = 0
         num_batches = 0
         for i, batch in enumerate(tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
-            b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'])
-            
-            b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_labels = b_ids_1.to(device), b_mask_1.to(device), b_ids_2.to(device), b_mask_2.to(device), b_labels.to(device)
- 
+            b_ids_1, b_mask_1, b_ids_2, b_mask_2, b_ids_3, b_mask_3, b_labels = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['token_ids_3'], batch['attention_mask_3'], batch['labels']) 
 
             optimizer.zero_grad()
 
             neutral_embed = model.forward(b_ids_1, b_mask_1)           
             positive_embed = model.forward(b_ids_2, b_mask_2)
+            negative_embed = model.forward(b_ids_3, b_mask_3)
 
-            # Shuffle indices to get negative examples
-            shuffled_indices = torch.randperm(b_ids_2.size(0)).to(device)
-
-            #while (shuffled_indices == range_tensor).any():
-            #    shuffled_indices = torch.randperm(b_ids_2.size(0)).to(device)
-
-            # Use shuffled indices to reorder both IDs and attention masks
-            neg_ids = b_ids_2[shuffled_indices]
-            neg_mask = b_mask_2[shuffled_indices]
-            
-            # Generate embeddings for negative examples
-            negative_embed = model.forward(neg_ids, neg_mask)
-            #neutral_embed.requires_grad = True
-            #positive_embed.requires_grad = True
-            #negative_embed.requires_grad = True
+            negative_embed.requires_grad = True
 
             cos_sim_a = cosine_similarity_embedding(neutral_embed.unsqueeze(1), positive_embed.unsqueeze(0), temp = temp)
-
             cos_sim_b = cosine_similarity_embedding(neutral_embed.unsqueeze(1), negative_embed.unsqueeze(0), temp = temp)
             
             cos_sim = torch.cat([cos_sim_a, cos_sim_b], 1)

@@ -137,10 +137,57 @@ class SentencePairDataset(Dataset):
                 token_ids2, token_type_ids2, attention_mask2,
                 labels,sent_ids)
 
+class SentenceTripleDataset(Dataset):
+    def __init__(self, dataset, args, isRegression=False):
+        self.dataset = dataset
+        self.p = args
+        self.isRegression = isRegression 
+        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        return self.dataset[idx]
+
+    def pad_data(self, data):
+        print(x for x in data)
+        sent1 = [x[0] for x in data]
+        sent2 = [x[1] for x in data]
+        sent3 = [x[2] for x in data]
+        labels = [x[3] for x in data]
+        sent_ids = [x[4] for x in data]
+
+        encoding1 = self.tokenizer(sent1, return_tensors='pt', padding=True, truncation=True)
+        encoding2 = self.tokenizer(sent2, return_tensors='pt', padding=True, truncation=True)
+        encoding3 = self.tokenizer(sent3, return_tensors='pt', padding=True, truncation=True)
+
+        token_ids = torch.LongTensor(encoding1['input_ids'])
+        attention_mask = torch.LongTensor(encoding1['attention_mask'])
+        token_type_ids = torch.LongTensor(encoding1['token_type_ids'])
+
+        token_ids2 = torch.LongTensor(encoding2['input_ids'])
+        attention_mask2 = torch.LongTensor(encoding2['attention_mask'])
+        token_type_ids2 = torch.LongTensor(encoding2['token_type_ids'])
+
+        token_ids3 = torch.LongTensor(encoding3['input_ids'])
+        attention_mask3 = torch.LongTensor(encoding3['attention_mask'])
+        token_type_ids3 = torch.LongTensor(encoding3['token_type_ids'])
+        if self.isRegression:
+            labels = torch.DoubleTensor(labels)
+        else:
+            labels = torch.LongTensor(labels)
+
+        return (token_ids, token_type_ids, attention_mask,
+                token_ids2, token_type_ids2, attention_mask2,
+                token_ids3, token_type_ids3, attention_mask3,
+                labels,sent_ids)
+
     def collate_fn(self, all_data):
         (token_ids, token_type_ids, attention_mask,
-         token_ids2, token_type_ids2, attention_mask2,
-         labels, sent_ids) = self.pad_data(all_data)
+        token_ids2, token_type_ids2, attention_mask2,
+        token_ids3, token_type_ids3, attention_mask3,
+        labels, sent_ids) = self.pad_data(all_data)
 
         batched_data = {
                 'token_ids_1': token_ids,
@@ -149,6 +196,9 @@ class SentencePairDataset(Dataset):
                 'token_ids_2': token_ids2,
                 'token_type_ids_2': token_type_ids2,
                 'attention_mask_2': attention_mask2,
+                'token_ids_3': token_ids3,
+                'token_type_ids_3': token_type_ids3,
+                'attention_mask_3': attention_mask3,
                 'labels': labels,
                 'sent_ids': sent_ids
             }
@@ -270,3 +320,72 @@ def load_multitask_data(sentiment_filename,paraphrase_filename,similarity_filena
     print(f"Loaded {len(similarity_data)} {split} examples from {similarity_filename}")
 
     return sentiment_data, num_labels, paraphrase_data, similarity_data
+
+
+def load_multitask_data_supervised(sentiment_filename,paraphrase_filename,similarity_filename,split='train'):
+    sentiment_data = []
+    num_labels = {}
+    if split == 'test':
+        with open(sentiment_filename, 'r') as fp:
+            for record in csv.DictReader(fp,delimiter = '\t'):
+                sent = record['sentence'].lower().strip()
+                sent_id = record['id'].lower().strip()
+                sentiment_data.append((sent,sent_id))
+    else:
+        with open(sentiment_filename, 'r') as fp:
+            for record in csv.DictReader(fp,delimiter = '\t'):
+                sent = record['sentence'].lower().strip()
+                sent_id = record['id'].lower().strip()
+                label = int(record['sentiment'].strip())
+                if label not in num_labels:
+                    num_labels[label] = len(num_labels)
+                sentiment_data.append((sent, label,sent_id))
+
+    print(f"Loaded {len(sentiment_data)} {split} examples from {sentiment_filename}")
+
+    print(f'Loading paraphrase data from {paraphrase_filename}')
+    paraphrase_data = []
+    if split == 'test':
+        with open(paraphrase_filename, 'r') as fp:
+            for record in csv.DictReader(fp,delimiter = '\t'):
+                print(record)
+                sent_id = record['id'].lower().strip()
+                paraphrase_data.append((preprocess_string(record['sentence1']),
+                                        preprocess_string(record['sentence2']),
+                                        preprocess_string(record['sentence3']),
+                                        sent_id))
+
+    else:
+        with open(paraphrase_filename, 'r') as fp:
+            for record in csv.DictReader(fp,delimiter = '\t'):
+                try:
+                    sent_id = record['id'].lower().strip()
+                    paraphrase_data.append((preprocess_string(record['sentence1']),
+                                            preprocess_string(record['sentence2']),
+                                            preprocess_string(record['sentence3']),
+                                            int(float(record['is_duplicate'])),sent_id))
+                except:
+                    pass
+
+    print(f"Loaded {len(paraphrase_data)} {split} examples from {paraphrase_filename}")
+
+    similarity_data = []
+    if split == 'test':
+        with open(similarity_filename, 'r') as fp:
+            for record in csv.DictReader(fp,delimiter = '\t'):
+                sent_id = record['id'].lower().strip()
+                similarity_data.append((preprocess_string(record['sentence1']),
+                                        preprocess_string(record['sentence2']),
+                                        sent_id))
+    else:
+        with open(similarity_filename, 'r') as fp:
+            for record in csv.DictReader(fp,delimiter = '\t'):
+                sent_id = record['id'].lower().strip()
+                similarity_data.append((preprocess_string(record['sentence1']),
+                                        preprocess_string(record['sentence2']),
+                                        float(record['similarity']),sent_id))
+
+    print(f"Loaded {len(similarity_data)} {split} examples from {similarity_filename}")
+
+    return sentiment_data, num_labels, paraphrase_data, similarity_data
+
