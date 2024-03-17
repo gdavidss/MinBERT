@@ -151,7 +151,6 @@ class SentenceTripleDataset(Dataset):
         return self.dataset[idx]
 
     def pad_data(self, data):
-        print(x for x in data)
         sent1 = [x[0] for x in data]
         sent2 = [x[1] for x in data]
         sent3 = [x[2] for x in data]
